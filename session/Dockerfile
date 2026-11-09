@@ -29,7 +29,7 @@ RUN apt-get update \
 # and gcc/g++/Qt6 to build the key-capture shim and the DB-read harness
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 \
-      xdotool \
+      xdotool inotify-tools \
       gcc g++ libc6-dev pkg-config qt6-base-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -54,6 +54,7 @@ RUN usermod -l viber -d /home/viber -m ubuntu && groupmod -n viber ubuntu
 COPY supervisord.conf /etc/supervisor/viber-session.conf
 COPY start-viber.sh /usr/local/bin/start-viber.sh
 COPY decrypt_plugin.py /usr/local/bin/decrypt_plugin.py
+COPY reader.py /usr/local/bin/reader.py
 RUN chmod +x /usr/local/bin/start-viber.sh
 
 USER viber

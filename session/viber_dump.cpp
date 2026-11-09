@@ -9,6 +9,8 @@
 //   argv[1..] : SQL statements to run (defaults to listing tables). Rows printed tab-separated.
 
 #include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -19,17 +21,29 @@
 #include <cstdlib>
 
 static bool run(QSqlDatabase &db, const QString &sql, bool printRows) {
+    static const bool asJson = getenv("VIBER_JSON") != nullptr;
     QSqlQuery q(db);
     if (!q.exec(sql)) {
         fprintf(stderr, "ERR exec: %s\n", q.lastError().text().toUtf8().constData());
         return false;
     }
     if (printRows) {
-        int cols = q.record().count();
+        QSqlRecord rec = q.record();
+        int cols = rec.count();
         while (q.next()) {
-            QStringList row;
-            for (int i = 0; i < cols; i++) row << q.value(i).toString();
-            printf("%s\n", row.join("\t").toUtf8().constData());
+            if (asJson) {
+                // one JSON object per line (JSONL) — safe for text with tabs/newlines
+                QJsonObject o;
+                for (int i = 0; i < cols; i++) {
+                    QVariant v = q.value(i);
+                    o[rec.fieldName(i)] = v.isNull() ? QJsonValue() : QJsonValue(v.toString());
+                }
+                printf("%s\n", QJsonDocument(o).toJson(QJsonDocument::Compact).constData());
+            } else {
+                QStringList row;
+                for (int i = 0; i < cols; i++) row << q.value(i).toString();
+                printf("%s\n", row.join("\t").toUtf8().constData());
+            }
         }
     }
     return true;
