@@ -1,0 +1,15 @@
+# v0: a single Viber Desktop session to check that Viber lives in a container.
+# Screen in the browser: http://localhost:6080
+services:
+  viber-session:
+    build: ./session
+    platform: linux/amd64
+    shm_size: 1gb
+    ports:
+      - "127.0.0.1:6080:6080"
+    volumes:
+      - viber-profile:/home/viber
+    restart: unless-stopped
+
+volumes:
+  viber-profile:
