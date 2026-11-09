@@ -1,2 +1,4 @@
 .env
 *.deb
+__pycache__/
+*.pyc
