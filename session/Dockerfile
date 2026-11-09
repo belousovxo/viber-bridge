@@ -1,6 +1,6 @@
 # One Viber Desktop session per container:
 # Xvfb (virtual screen) + fluxbox (window manager) + x11vnc + noVNC (screen in the browser) + Viber.
-FROM --platform=linux/amd64 ubuntu:24.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
