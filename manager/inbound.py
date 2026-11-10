@@ -25,6 +25,15 @@ def _mime(path):
     return mimetypes.guess_type(path)[0] or "application/octet-stream"
 
 
+# Viber wraps display names in Unicode bidi isolates (U+2066..U+2069); they'd end up invisible
+# inside Chatwoot contact names and break search/matching.
+_BIDI_ISOLATES = dict.fromkeys(map(ord, "⁦⁧⁨⁩"))
+
+
+def _clean_name(name):
+    return (name or "").translate(_BIDI_ISOLATES).strip() or None
+
+
 class InboundWorker(threading.Thread):
     def __init__(self, session_id, registry, log):
         super().__init__(daemon=True, name=f"inbound-{session_id}")
@@ -93,7 +102,7 @@ class InboundWorker(threading.Thread):
             self.reg.update(self.sid, last_event=event_id)
             return
         number = "+" + str(contact["number"]).lstrip("+")
-        name = contact.get("name")
+        name = _clean_name(contact.get("name"))
         content = evt.get("text") or None
         attachments = self._attachments(row["container"], evt)
 

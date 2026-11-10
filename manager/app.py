@@ -52,7 +52,10 @@ def log(msg):
 
 
 def inbox_id_of(payload):
-    return (payload.get("inbox") or {}).get("id") or (payload.get("conversation") or {}).get("inbox_id")
+    """message_* events carry `inbox.id`, typing events `conversation.inbox_id`, conversation_* events
+    are the conversation itself (top-level `inbox_id`)."""
+    return ((payload.get("inbox") or {}).get("id") or (payload.get("conversation") or {}).get("inbox_id")
+            or payload.get("inbox_id"))
 
 
 def signature_valid(secret, headers, body):
