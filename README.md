@@ -49,9 +49,17 @@ Chatwoot webhook ─▶ POST /chatwoot/webhook ─docker exec▶ agent.py send (
 
 Internals (`bridge/` provides the reused Chatwoot HTTP client): incoming are posted **token-free**
 via the **Public Inbox API** (keyed by the channel `inbox_identifier`), with `source_id` = the
-sender's number so contacts/threads never duplicate; media pulled out with `docker cp`. Outgoing
-agent replies arrive on the Channel::Api `webhook_url` and are sent by the in-container agent.
-Delivery statuses are deferred (the Public API doesn't update message status).
+sender's number so contacts/threads never duplicate; media pulled out with `docker cp`. Only 1:1
+chats are bridged (group/community messages carry no sender number and are skipped). The worker
+replays the container log on every attach and drops what its EventID cursor already posted, so
+nothing received while the manager was down is lost.
+
+Outgoing agent replies arrive on the Channel::Api `webhook_url` and are sent by the in-container
+agent: text, and attachments downloaded from Chatwoot (png/jpeg through the media preview with the
+text as caption, other files as files with the text following). Before each send the agent closes
+Viber's overlays (promos, info panels, the "Sync chat history" prompt shown on every start); a send
+counts as delivered only when a new outgoing event to the target appears in the Viber DB. Delivery
+statuses are deferred (the Public API doesn't update message status).
 
 ### Run (local)
 

@@ -3,16 +3,15 @@
 
 Guarantees, in order of strength:
   1. Addressing: viber://chat?number=<E164> opens the chat by number (Viber's own routing).
-  2. Memory: the agent remembers the last CONFIRMED-open chat, so a reply to the same chat sends
-     directly with no deep link and no wait.
-  3. Render wait: for a new chat, after the deep link it waits on an AT-SPI children-changed event
-     (push, not a guessed delay); no event within the timeout == the switch didn't happen -> abort.
-  4. Extra text check: the target chat's last message (from the decrypted DB) must be visible in
-     the open conversation (belt-and-suspenders; text alone isn't identity, so it only gates when
-     the DB last message is non-empty text).
-  5. Ground truth: after sending, the newest outgoing Event's ChatID->number (from the DB) must
-     equal the target. Only then is the transition confirmed and remembered; a mismatch is a
-     misroute -> not delivered, alert, memory left untouched so the next send re-deep-links.
+  2. Text check: text bubbles on screen that match the target chat's recent history (from the
+     decrypted DB) prove it is open -> send directly; bubbles that don't match -> wrong chat.
+  3. Render wait: otherwise it deep-links and waits on an AT-SPI children-changed event (push, not
+     a guessed delay); the event proves the switch.
+  4. Memory: no event means the chat was already open — trusted only if the last CONFIRMED send
+     went to the same number.
+  5. Ground truth: after sending, a NEW outgoing Event must appear in the DB and its ChatID->number
+     must equal the target. Only then is the chat remembered; a mismatch is a misroute -> not
+     delivered, memory cleared.
 
 State (confirmed number of the open chat) persists to a file so it survives across CLI calls and
 process restarts. In the Chatwoot bridge this is just the agent's in-memory state.
@@ -48,6 +47,9 @@ STATE_FILE = os.path.join(HOME, ".viber-bridge", "open_chat")
 RENDER_TIMEOUT = 2.5      # cap waiting for the switch's render event (a real switch fires ~0.35s)
 POST_SETTLE = 0.05
 MEDIA_PREVIEW_SETTLE = 1.0  # pasted image -> media preview with a focused caption field
+RECENT_TEXTS = 20  # chat history depth the on-screen chat identity check compares against
+OVERLAY_MAX_ESCAPES = 3
+OVERLAY_SETTLE = 0.3
 PREVIEW_IMAGE_MIMES = {"image/png", "image/jpeg"}  # pasted as image data (anything else: as a file)
 
 
@@ -166,6 +168,23 @@ def viber_app():
     return None
 
 
+def _showing_dialog(node):
+    return node.getRoleName() == "dialog" and node.getState().contains(pyatspi.STATE_SHOWING)
+
+
+def dismiss_overlays():
+    """Close whatever Viber popped over the chat — feature promos, info panels, the post-link
+    "Sync chat history" prompt — so the paste lands in the composer. Escape is Viber's cancel and a
+    no-op on a bare chat. Pressed at least once (promo layers aren't exposed as dialogs), then again
+    while a dialog still shows. Whatever survives is left to the post-send DB verification."""
+    for _ in range(OVERLAY_MAX_ESCAPES):
+        xdo("key", "Escape")
+        time.sleep(OVERLAY_SETTLE)
+        app = viber_app()
+        if not app or not pyatspi.findDescendant(app, _showing_dialog):
+            return
+
+
 def visible_messages_and_composer(app=None):
     app = app or viber_app()
     if not app:
@@ -249,14 +268,15 @@ def norm(n):
 
 
 def last_text_visible(number, msgs):
-    """Extra check: is the target chat's last DB message currently on screen?
-    Returns True/False, or None when the DB last message is empty/media (check skipped)."""
-    texts = target_last_texts(number, limit=3)
-    texts = [t for t in texts if t and t.strip()]
-    if not texts:
-        return None  # nothing text-based to compare against
-    joined = "\u0001".join(msgs)
-    return any(t in joined for t in texts)
+    """Extra check: does a text bubble on screen belong to the target chat's recent history?
+    Compares whole bubbles (exact, after the 300-char read cap) against the chat's recent texts —
+    not just the last ones, since recent media can push them out of the viewport. Returns
+    True/False, or None when there is nothing to compare (no texts in the chat or on screen)."""
+    visible = {m.strip() for m in msgs if m.strip()}
+    texts = {t.strip()[:300] for t in target_last_texts(number, limit=RECENT_TEXTS) if t.strip()}
+    if not texts or not visible:
+        return None
+    return bool(visible & texts)
 
 
 def focus(composer):
@@ -274,37 +294,26 @@ def do_paste_send(composer):
 
 
 def open_chat(number):
-    """Bring the target's chat to the front. Returns (composer, None) or (None, failure_reason)."""
-    same_chat = (load_open_chat() == number)
+    """Bring the target's chat to the front. Returns (composer, None) or (None, failure_reason).
 
-    if same_chat:
-        msgs, composer = visible_messages_and_composer()
-        # extra text check for the already-open case
-        chk = last_text_visible(number, msgs)
-        if chk is False:
-            # on-screen chat doesn't show the target's last message -> don't trust memory, re-open
-            same_chat = False
-
-    if not same_chat:
-        msgs, composer = visible_messages_and_composer()
-        if last_text_visible(number, msgs) is True:
-            # target already open though memory didn't know it -> send directly, no deep link/wait
-            pass
-        else:
-            # genuine switch: deep link + wait for the render event (push, not a guessed delay)
-            subprocess.Popen([VIBER, f"viber://chat?number={number}"], env={"DISPLAY": DISPLAY},
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            switched = wait_render_event()
-            msgs, composer = visible_messages_and_composer()
-            chk = last_text_visible(number, msgs)
-            if not switched:
-                # no render event: already-open (no-op) only acceptable if its last msg shows now
-                if chk is not True:
-                    return None, "no_switch"
-            elif chk is False:
-                return None, "wrong_chat_text"
-    else:
-        msgs, composer = visible_messages_and_composer()
+    Evidence, strongest first:
+      - on-screen text bubbles match the target's history -> it's open, send directly;
+      - otherwise always deep-link: a render event proves the switch (any other chat on screen,
+        even an empty one, re-renders);
+      - no render event means the target was already open (the link is a no-op) — accepted only
+        when the last confirmed send went to this same number."""
+    msgs, composer = visible_messages_and_composer()
+    if last_text_visible(number, msgs) is True:
+        return composer, None
+    subprocess.Popen([VIBER, f"viber://chat?number={number}"], env={"DISPLAY": DISPLAY},
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    switched = wait_render_event()
+    msgs, composer = visible_messages_and_composer()
+    chk = last_text_visible(number, msgs)
+    if chk is False:
+        return None, "wrong_chat_text"
+    if not switched and chk is not True and load_open_chat() != number:
+        return None, "no_switch"
     return composer, None
 
 
@@ -333,6 +342,7 @@ def send(number, text):
     t0 = time.time()
     if not activate_window():
         return {"ok": False, "reason": "no_window"}
+    dismiss_overlays()
     composer, err = open_chat(number)
     if err:
         return {"ok": False, "reason": err, "elapsed": time.time() - t0}
@@ -352,6 +362,7 @@ def send_file(number, path, caption=""):
     t0 = time.time()
     if not activate_window():
         return {"ok": False, "reason": "no_window"}
+    dismiss_overlays()
     composer, err = open_chat(number)
     if err:
         return {"ok": False, "reason": err, "elapsed": time.time() - t0}

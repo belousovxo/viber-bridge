@@ -87,7 +87,12 @@ class InboundWorker(threading.Thread):
             return
 
         contact = evt.get("contact") or {}
-        number = "+" + str(contact.get("number") or row.get("number") or "").lstrip("+")
+        if not contact.get("number"):
+            # group/community/bot messages carry no sender number; the bridge maps 1:1 chats only
+            self.log(f"[in] {self.sid} event {event_id} skipped: no sender number (not a 1:1 chat)")
+            self.reg.update(self.sid, last_event=event_id)
+            return
+        number = "+" + str(contact["number"]).lstrip("+")
         name = contact.get("name")
         content = evt.get("text") or None
         attachments = self._attachments(row["container"], evt)
@@ -105,7 +110,9 @@ class InboundWorker(threading.Thread):
             row = self._row()
             if not row:
                 return
-            proc = docker_ops.logs_follow(row["container"])
+            # Replay the whole log on every (re)attach: the EventID cursor drops what was already
+            # posted, and nothing received while the manager was down is lost.
+            proc = docker_ops.logs_follow(row["container"], tail="all")
             try:
                 for line in proc.stdout:
                     if self._stop.is_set():
