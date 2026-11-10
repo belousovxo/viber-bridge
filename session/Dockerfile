@@ -63,6 +63,7 @@ COPY start-viber.sh /usr/local/bin/start-viber.sh
 COPY decrypt_plugin.py /usr/local/bin/decrypt_plugin.py
 COPY reader.py /usr/local/bin/reader.py
 COPY send.py /usr/local/bin/send.py
+COPY agent.py /usr/local/bin/agent.py
 RUN chmod +x /usr/local/bin/start-viber.sh
 
 USER viber
