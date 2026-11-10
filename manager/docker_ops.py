@@ -55,6 +55,12 @@ def exec_argv(name, argv, timeout=120, env=None):
     return _run(["exec", *flags, name, *argv], text=True, timeout=timeout)
 
 
+def cp_in(name, src_path, dst_path):
+    """docker cp a local file/dir into the container. Returns True on success."""
+    r = _run(["cp", src_path, f"{name}:{dst_path}"], text=True)
+    return r.returncode == 0
+
+
 def cp_out(name, src_path, dst_path):
     """docker cp a file out of the container. Returns True on success."""
     r = _run(["cp", f"{name}:{src_path}", dst_path], text=True)

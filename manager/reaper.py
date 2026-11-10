@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Reaper: tears down sessions that no longer have a reason to run.
+
+Chatwoot doesn't notify the inbox webhook when an inbox is deleted, so the manager reconciles on a
+timer instead:
+  - bound session  -> probe the inbox via the token-free Public API; an explicit 404 means the
+                      inbox was deleted, so stop the worker and remove the container + volume.
+                      Probe errors (Chatwoot down, 5xx) are skipped, never treated as a deletion.
+  - unbound session older than UNBOUND_TTL -> abandoned onboarding (tab closed before linking or
+                      before bind): remove it so idle Viber containers don't pile up.
+"""
+
+import threading
+import time
+
+from bridge.chatwoot import PublicInbox
+
+INTERVAL = 60  # seconds between passes
+UNBOUND_TTL = 15 * 60  # an onboarding that hasn't bound within this window is abandoned
+
+
+class Reaper:
+    def __init__(self, registry, teardown, log):
+        self.reg = registry
+        self.teardown = teardown
+        self.log = log
+
+    def start(self):
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            self._pass()
+            time.sleep(INTERVAL)
+
+    def _pass(self):
+        now = time.time()
+        for row in self.reg.all():
+            sid = row["id"]
+            if row.get("inbox_id"):
+                try:
+                    alive = PublicInbox(row["chatwoot_url"], row["inbox_identifier"]).exists()
+                except Exception as e:  # noqa: BLE001 — any probe failure means "unknown", keep it
+                    self.log(f"[reaper] {sid} inbox probe failed, keeping: {e}")
+                    continue
+                if not alive:
+                    self.log(f"[reaper] {sid} inbox {row['inbox_id']} deleted -> teardown")
+                    self.teardown(sid)
+            elif now - row["created_at"] > UNBOUND_TTL:
+                self.log(f"[reaper] {sid} unbound for {int(now - row['created_at'])}s -> teardown")
+                self.teardown(sid)

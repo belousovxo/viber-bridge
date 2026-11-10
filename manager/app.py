@@ -19,6 +19,9 @@ API:
   POST   /sessions/<id>/bind       {inbox_id, inbox_identifier, chatwoot_url, account_id?}
   DELETE /sessions/<id>            -> {ok}
   POST   /chatwoot/webhook         Channel::Api webhook -> Viber send
+
+Background: a reaper (manager/reaper.py) removes sessions whose inbox was deleted in Chatwoot and
+onboardings abandoned before bind.
 """
 
 import os
@@ -28,6 +31,7 @@ from flask import Flask, Response, jsonify, request
 
 from .outbound import Dispatcher
 from .qr import screenshot_png
+from .reaper import Reaper
 from .registry import Registry
 from .sessions import SessionManager
 from .workers import Workers
@@ -43,7 +47,13 @@ def create_app():
     sessions = SessionManager(registry, image, log)
     workers = Workers(registry, log)
     dispatcher = Dispatcher(registry, log)
+
+    def teardown(sid):
+        workers.stop(sid)
+        return sessions.delete(sid)
+
     workers.start_bound()  # resume bound sessions after a restart
+    Reaper(registry, teardown, log).start()  # drop sessions of deleted inboxes / abandoned onboarding
 
     app = Flask(__name__)
 
@@ -106,8 +116,7 @@ def create_app():
     def delete_session(sid):
         if request.method == "OPTIONS":
             return ("", 204)
-        workers.stop(sid)
-        ok = sessions.delete(sid)
+        ok = teardown(sid)
         return jsonify({"ok": ok}), (200 if ok else 404)
 
     @app.route("/chatwoot/webhook", methods=["POST"])

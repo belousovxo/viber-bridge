@@ -99,6 +99,11 @@ the inbox on link, and binds it.
 | DELETE | `/sessions/:id` | stop + remove container/volume |
 | POST | `/chatwoot/webhook` | Channel::Api webhook → Viber send |
 
+A background **reaper** (once a minute) removes the container + volume of a session whose Chatwoot
+inbox was deleted (Public API returns 404; probe errors never count as deletion) and of onboardings
+that didn't bind within 15 minutes. The Viber tile also deletes its session when you leave the page
+before linking.
+
 ## Next steps
 
 - Mirror messages the user sends from Viber directly as outgoing in Chatwoot.

@@ -7,6 +7,9 @@ We set `source_id` = the sender's E.164 number, and ContactInboxWithContactBuild
 it, so contacts/threads never duplicate. No agent/bot token is needed for incoming (the AgentBot
 path can't create contacts anyway); outgoing is received separately on the Channel::Api webhook.
 
+Liveness probe (used by the manager's reaper): GET /public/api/v1/inboxes/:identifier -> 404 once
+the inbox is deleted.
+
 Endpoints (POST):
   /public/api/v1/inboxes/:identifier/contacts                                   -> create contact
   /public/api/v1/inboxes/:identifier/contacts/:source_id/conversations          -> create conversation
@@ -31,6 +34,16 @@ class PublicInbox:
         if not r.ok:
             raise ChatwootError(f"POST {path} -> {r.status_code}: {r.text[:300]}")
         return r.json() if r.content else {}
+
+    def exists(self):
+        """False only on an explicit 404 (inbox/channel deleted). Network errors and 5xx raise, so a
+        Chatwoot outage is never mistaken for a deletion."""
+        r = self.s.get(self.base, timeout=self.timeout)
+        if r.status_code == 404:
+            return False
+        if not r.ok:
+            raise ChatwootError(f"GET inbox -> {r.status_code}")
+        return True
 
     def ensure_contact(self, number, name=None):
         """Idempotent on source_id = number. Returns the source_id (= number)."""

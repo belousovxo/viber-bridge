@@ -18,11 +18,13 @@ State (confirmed number of the open chat) persists to a file so it survives acro
 process restarts. In the Chatwoot bridge this is just the agent's in-memory state.
 
 CLI: agent.py send <+E164number> <text>
+     agent.py send-file <+E164number> <path> [caption]
 Needs DISPLAY=:99 and the shared DBUS_SESSION_BUS_ADDRESS.
 """
 
 import glob
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -31,6 +33,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 import pyatspi
 
@@ -44,6 +47,8 @@ STATE_FILE = os.path.join(HOME, ".viber-bridge", "open_chat")
 
 RENDER_TIMEOUT = 2.5      # cap waiting for the switch's render event (a real switch fires ~0.35s)
 POST_SETTLE = 0.05
+MEDIA_PREVIEW_SETTLE = 1.0  # pasted image -> media preview with a focused caption field
+PREVIEW_IMAGE_MIMES = {"image/png", "image/jpeg"}  # pasted as image data (anything else: as a file)
 
 
 # ─── low-level X / clipboard ────────────────────────────────────────────────
@@ -123,11 +128,19 @@ def target_last_texts(number, limit=5):
     return [r.get("Body", "") for r in rows if r.get("Body")]
 
 
-def recipient_of_last_outgoing():
-    """The OTHER party (recipient) of the newest outgoing message, by number."""
+def last_outgoing_event_id():
+    """EventID of the newest outgoing message (0 if none) — the baseline taken before a send."""
+    rows = db_query("SELECT MAX(EventID) AS id FROM Events WHERE Direction = 1")
+    return int(rows[0].get("id") or 0) if rows else 0
+
+
+def recipient_of_last_outgoing(after_event_id):
+    """The OTHER party (recipient) of the newest outgoing message NEWER than `after_event_id`, by
+    number. Only a new event proves this send happened: an older outgoing message to the same chat
+    must not count (a swallowed Enter would otherwise be reported as delivered)."""
     rows = db_query(
         "SELECT e.EventID, e.ChatID FROM Events e WHERE e.Direction = 1 "
-        "ORDER BY e.EventID DESC LIMIT 1")
+        f"AND e.EventID > {int(after_event_id)} ORDER BY e.EventID DESC LIMIT 1")
     if not rows:
         return None
     chat_id = rows[0].get("ChatID")
@@ -246,24 +259,22 @@ def last_text_visible(number, msgs):
     return any(t in joined for t in texts)
 
 
-def do_paste_send(composer):
+def focus(composer):
     if composer is not None:
         try:
             composer.queryComponent().grabFocus()
             time.sleep(POST_SETTLE)
         except Exception:
             pass
+
+
+def do_paste_send(composer):
+    focus(composer)
     xdo("key", "--clearmodifiers", "ctrl+a", "key", "--clearmodifiers", "ctrl+v", "key", "Return")
 
 
-def send(number, text):
-    """Return a result dict: {ok, reason, elapsed, confirmed}."""
-    number = norm(number)
-    t0 = time.time()
-    if not activate_window():
-        return {"ok": False, "reason": "no_window"}
-    set_clipboard(text)
-
+def open_chat(number):
+    """Bring the target's chat to the front. Returns (composer, None) or (None, failure_reason)."""
     same_chat = (load_open_chat() == number)
 
     if same_chat:
@@ -289,18 +300,19 @@ def send(number, text):
             if not switched:
                 # no render event: already-open (no-op) only acceptable if its last msg shows now
                 if chk is not True:
-                    return {"ok": False, "reason": "no_switch", "elapsed": time.time() - t0}
+                    return None, "no_switch"
             elif chk is False:
-                return {"ok": False, "reason": "wrong_chat_text", "elapsed": time.time() - t0}
+                return None, "wrong_chat_text"
     else:
         msgs, composer = visible_messages_and_composer()
+    return composer, None
 
-    do_paste_send(composer)
 
-    # ground-truth post-send verification
+def confirm(number, baseline, t0):
+    """Ground-truth post-send verification: a NEW outgoing event addressed to the target."""
     recipient = None
-    for _ in range(20):
-        recipient = recipient_of_last_outgoing()
+    for _ in range(50):
+        recipient = recipient_of_last_outgoing(baseline)
         if recipient:
             break
         time.sleep(0.1)
@@ -315,13 +327,68 @@ def send(number, text):
             "db_recipient": recipient, "target": number}
 
 
+def send(number, text):
+    """Return a result dict: {ok, reason, elapsed, confirmed}."""
+    number = norm(number)
+    t0 = time.time()
+    if not activate_window():
+        return {"ok": False, "reason": "no_window"}
+    composer, err = open_chat(number)
+    if err:
+        return {"ok": False, "reason": err, "elapsed": time.time() - t0}
+    set_clipboard(text)
+    baseline = last_outgoing_event_id()
+    do_paste_send(composer)
+    return confirm(number, baseline, t0)
+
+
+def send_file(number, path, caption=""):
+    """Send a local file. Viber takes both from the clipboard, but differently:
+      - png/jpeg as image data -> opens the media preview with its caption field focused; the
+        caption is pasted there and Return sends photo + caption as one message;
+      - anything else as a file:// uri-list -> sent immediately as a file, no preview, so a caption
+        follows as its own text message."""
+    number = norm(number)
+    t0 = time.time()
+    if not activate_window():
+        return {"ok": False, "reason": "no_window"}
+    composer, err = open_chat(number)
+    if err:
+        return {"ok": False, "reason": err, "elapsed": time.time() - t0}
+    mime = mimetypes.guess_type(path)[0] or ""
+    baseline = last_outgoing_event_id()
+    focus(composer)
+    if mime in PREVIEW_IMAGE_MIMES:
+        subprocess.run(["xclip", "-selection", "clipboard", "-t", mime, "-i", path],
+                       env={"DISPLAY": DISPLAY}, check=True)
+        xdo("key", "--clearmodifiers", "ctrl+v")
+        time.sleep(MEDIA_PREVIEW_SETTLE)
+        if caption:
+            set_clipboard(caption)
+            xdo("key", "--clearmodifiers", "ctrl+v")
+        xdo("key", "Return")
+        return confirm(number, baseline, t0)
+    uri = "file://" + urllib.parse.quote(os.path.abspath(path)) + "\r\n"
+    subprocess.run(["xclip", "-selection", "clipboard", "-t", "text/uri-list"],
+                   input=uri.encode(), env={"DISPLAY": DISPLAY}, check=True)
+    xdo("key", "--clearmodifiers", "ctrl+v")
+    res = confirm(number, baseline, t0)
+    if res.get("ok") and caption:
+        cap = send(number, caption)
+        if not cap.get("ok"):
+            return {**cap, "reason": f"file sent, caption failed: {cap.get('reason')}"}
+    return res
+
+
 def main():
-    if len(sys.argv) >= 4 and sys.argv[1] == "send":
-        res = send(sys.argv[2], sys.argv[3])
-    elif len(sys.argv) >= 3:
-        res = send(sys.argv[1], sys.argv[2])
+    args = sys.argv[1:]
+    if len(args) >= 3 and args[0] == "send":
+        res = send(args[1], args[2])
+    elif len(args) >= 3 and args[0] == "send-file":
+        res = send_file(args[1], args[2], args[3] if len(args) >= 4 else "")
     else:
-        print("usage: agent.py send <+E164number> <text>", file=sys.stderr)
+        print("usage: agent.py send <+E164number> <text>\n"
+              "       agent.py send-file <+E164number> <path> [caption]", file=sys.stderr)
         return 2
     print(json.dumps(res, ensure_ascii=False))
     return 0 if res.get("ok") else 1
