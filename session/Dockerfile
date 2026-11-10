@@ -48,6 +48,13 @@ RUN g++ -O2 -fPIC /tmp/viber_dump.cpp -o /usr/local/bin/viber_dump \
 RUN ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html \
     && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 
+# AT-SPI accessibility stack — lets the sender wait for the target chat to actually render
+# (event-driven, no guessed delays) and verify the right chat opened. Trailing layer so the
+# Qt toolchain layer above stays cached.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      at-spi2-core python3-pyatspi python3-gi \
+    && rm -rf /var/lib/apt/lists/*
+
 # ubuntu:24.04 ships user "ubuntu" with uid 1000; rename it to "viber"
 RUN usermod -l viber -d /home/viber -m ubuntu && groupmod -n viber ubuntu
 
