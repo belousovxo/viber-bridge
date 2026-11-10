@@ -25,11 +25,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends /tmp/viber.deb \
     && rm -rf /tmp/viber.deb /var/lib/apt/lists/*
 
-# Python reader/agent, xdotool (drive sending via the UI), sqlite3 for plaintext config DBs,
-# and gcc/g++/Qt6 to build the key-capture shim and the DB-read harness
+# python3 for the reader/agent, xdotool+xclip to drive sending via the UI, inotify-tools for the
+# reader's change trigger, and gcc/g++/Qt6 to build the key-capture shim and the DB-read harness
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 \
-      xdotool inotify-tools \
+      xdotool xclip inotify-tools \
       gcc g++ libc6-dev pkg-config qt6-base-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -55,6 +55,7 @@ COPY supervisord.conf /etc/supervisor/viber-session.conf
 COPY start-viber.sh /usr/local/bin/start-viber.sh
 COPY decrypt_plugin.py /usr/local/bin/decrypt_plugin.py
 COPY reader.py /usr/local/bin/reader.py
+COPY send.py /usr/local/bin/send.py
 RUN chmod +x /usr/local/bin/start-viber.sh
 
 USER viber
