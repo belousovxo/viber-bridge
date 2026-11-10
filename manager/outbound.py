@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """Outbound dispatcher: Chatwoot -> Viber.
 
-The shared webhook endpoint hands each Channel::Api `message_created` payload here. On an outgoing
-message we find the session by inbox id (registry), extract the recipient number, and run the
-in-container send agent. Attachments are downloaded from their Chatwoot `data_url`, copied into the
+The shared webhook endpoint authenticates each Channel::Api payload, resolves its session and hands
+both here. Outgoing messages are queued per container and sent in Chatwoot message order by the
+in-container agent to the recipient number. Attachments are downloaded from their Chatwoot `data_url`, copied into the
 container and sent as files (the text becomes the first file's caption). Delivery-status updates
 are deferred, so this path never calls back into the Chatwoot API.
 """
 
 import json
 import os
+import queue
 import shutil
 import tempfile
 import threading
+import time
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -22,6 +24,7 @@ from . import docker_ops
 AGENT = "/usr/local/bin/agent.py"
 OUTBOX_PREFIX = "/tmp/outbox-"  # per-message dir inside the container holding files to send
 OUTBOX_GLOB = "outbox-*"
+REORDER_WINDOW = 0.3  # seconds to let shuffled webhooks of back-to-back replies arrive
 
 # agent.py drives the Viber UI via xdotool + AT-SPI, so `docker exec` must join the container's
 # running session: its X display and the shared D-Bus session bus (where at-spi-bus-launcher
@@ -46,12 +49,11 @@ def _is_outgoing(payload):
 
 
 class Dispatcher:
-    def __init__(self, registry, log):
-        self.reg = registry
+    def __init__(self, log):
         self.log = log
         self._seen = set()
         self._lock = threading.Lock()
-        self._ui_locks = {}
+        self._queues = {}
 
     def _dedup(self, message_id, cap=2000):
         with self._lock:
@@ -62,47 +64,55 @@ class Dispatcher:
                 self._seen = set(list(self._seen)[-cap:])
             return True
 
-    def handle(self, payload):
+    def handle(self, session, payload):
+        """Takes an authenticated webhook payload for `session`. Outgoing messages are queued per
+        container: one Viber window means sends run one at a time, in Chatwoot message order."""
         if payload.get("event") != "message_created" or not _is_outgoing(payload) or payload.get("private"):
             return
         message_id = payload.get("id")
         if message_id is None or not self._dedup(message_id):
             return
+        self._queue(session["container"]).put((message_id, session, payload))
 
-        inbox_id = (payload.get("inbox") or {}).get("id") or (payload.get("conversation") or {}).get("inbox_id")
-        session = self.reg.by_inbox(inbox_id) if inbox_id else None
+    def _queue(self, container):
+        with self._lock:
+            q = self._queues.get(container)
+            if q is None:
+                q = self._queues[container] = queue.PriorityQueue()
+                threading.Thread(target=self._drain, args=(q,), daemon=True, name=f"out-{container}").start()
+            return q
+
+    def _drain(self, q):
+        """Sends the lowest message id first. Chatwoot delivers webhooks in parallel, so back-to-back
+        replies arrive shuffled by milliseconds: wait a short window, then take the lowest id."""
+        while True:
+            q.put(q.get())  # block until there is work
+            time.sleep(REORDER_WINDOW)
+            _, session, payload = q.get()
+            try:
+                self._deliver(session, payload)
+            except Exception as e:  # noqa: BLE001 — one bad message must not stop the queue
+                self.log(f"[out] {session['id']} msg {payload.get('id')} error: {e}")
+
+    def _deliver(self, session, payload):
+        message_id = payload["id"]
         number = _number_from_payload(payload)
         content = payload.get("content")
         attachments = payload.get("attachments") or []
-
-        if not session:
-            self.log(f"[out] no session for inbox {inbox_id}")
-            return
         if not number or not (content or attachments):
             self.log(f"[out] skip msg {message_id}: {'no number' if not number else 'empty message'}")
             return
 
         number = "+" + str(number).lstrip("+")
         container = session["container"]
-        # One Viber window per container: sends must not interleave their clicks/pastes.
-        with self._ui_lock(container):
-            if attachments:
-                res = self._send_files(container, number, attachments, content, message_id)
-            else:
-                res = self._agent(container, ["send", number, content])
+        if attachments:
+            res = self._send_files(container, number, attachments, content, message_id)
+        else:
+            res = self._agent(container, ["send", number, content])
         if res.get("ok"):
-            self.log(f"[out] {self.sid_hint(session)} {number} delivered "
-                     f"({res.get('elapsed', 0):.2f}s) msg {message_id}")
+            self.log(f"[out] {session['id']} {number} delivered ({res.get('elapsed', 0):.2f}s) msg {message_id}")
         else:
             self.log(f"[out] {number} msg {message_id} FAILED: {res.get('reason')}")
-
-    @staticmethod
-    def sid_hint(session):
-        return session.get("id", "?")
-
-    def _ui_lock(self, container):
-        with self._lock:
-            return self._ui_locks.setdefault(container, threading.Lock())
 
     def _send_files(self, container, number, attachments, caption, message_id):
         """Download the Chatwoot attachments, copy them into the container, send each one; the

@@ -1,119 +1,139 @@
 # viber-bridge
 
-Connect a regular (numbered) Viber account to Chatwoot. Each number runs its own Viber Desktop in a Docker container, linked as a secondary device by QR code.
+Connect a regular (numbered) Viber account to Chatwoot. Each number runs its own Viber Desktop in a
+Docker container, linked as a secondary device by QR code. In Chatwoot it shows up as a **Viber**
+tile under *Add Inbox*: scan the QR with the phone and the number becomes an inbox.
 
-## v0: one session, manual check
+## How it works
 
-Goal: confirm that Viber Desktop runs in a container, links by QR, and receives and sends messages.
+Two parts:
+
+- **Session manager** (`manager/`, this repo): one `viber-session-<id>` container + volume per
+  number (image built from `session/`), the login QR, link detection, the session registry and the
+  per-session message bridge.
+- **Chatwoot** (the `xotravel/chatwoot` fork): the Viber tile, and a server-side proxy
+  (`/api/v1/accounts/:id/viber/sessions`) to the manager. Browsers never talk to the manager.
+
+```
+browser ── Chatwoot (admin only) ──Bearer key──▶ manager ──docker──▶ viber-session-<id>
+             POST   viber/sessions                POST /sessions        boots Viber
+             GET    viber/sessions/:id/qr         GET  /sessions/:id/qr  QR decoded + re-rendered
+             GET    viber/sessions/:id            GET  /sessions/:id     starting → linking → linked
+             POST   viber/sessions/:id/inbox      creates a Channel::Api inbox, then
+                                                  POST /sessions/:id/bind {inbox, identifier, secret}
+
+incoming:  viber-session log ─▶ inbound worker ─▶ Chatwoot Public Inbox API (no token)
+outgoing:  Chatwoot inbox webhook (HMAC-signed) ─▶ POST /chatwoot/webhook ─▶ agent.py in the container
+```
+
+- **Incoming** messages go through the token-free **Public Inbox API**, keyed by the inbox
+  identifier, with `source_id` = the sender's number so contacts and threads never duplicate. Media
+  is copied out with `docker cp`. Only 1:1 chats are bridged (group/community messages carry no
+  sender number and are skipped). The worker replays the container log on every attach and drops
+  what its EventID cursor already posted, so nothing received while the manager is down is lost.
+- **Outgoing** replies arrive on the inbox webhook. The manager verifies the signature with the
+  inbox secret it got at bind time, queues sends per container in Chatwoot message order, and the
+  in-container agent types them into Viber: text, png/jpeg through the media preview with the text
+  as caption, other files as files with the text following. Before each send the agent closes
+  Viber's overlays (promos, info panels, the "Sync chat history" prompt shown on every start). A
+  send counts as delivered only when a new outgoing event to the target appears in the Viber DB.
+- **Cleanup**: once a minute a reaper removes the container + volume of a session whose inbox was
+  deleted in Chatwoot (Public API returns 404; probe errors never count as a deletion) and of
+  onboardings not completed within 15 minutes. Leaving the tile page before linking drops the
+  session right away.
+- Session containers run with `--restart unless-stopped` and a memory limit, and keep their login
+  on the volume, so a crash or host reboot doesn't need a new QR scan.
+
+## Production deploy
+
+The manager needs the Docker daemon that will run the Viber containers (it mounts its socket) and
+outbound internet for Viber. It can share the host with Chatwoot or run on its own. Each linked
+number takes ~350 MB RAM (limit per container: `SESSION_MEMORY`, default `1g`).
+
+**1. Build the session image** on that Docker host. The pinned Viber `.deb` is not in git:
 
 ```bash
-docker compose up --build
+git clone <this repo> viber-bridge && cd viber-bridge
+curl -fsSL -o session/vendor/viber.deb https://download.cdn.viber.com/cdn/desktop/Linux/viber.deb
+dpkg-deb -f session/vendor/viber.deb Version     # must be 29.4.0.7, see session/vendor/README.md
+docker compose build                             # tags viber-session:latest
 ```
 
-Open http://localhost:6080 → **Connect**. You'll see the Viber screen with a QR code. Scan it from your phone (Viber → More → QR scanner) and confirm the login.
-
-The profile is stored in the `viber-profile` volume, so restarting the container doesn't require a new QR scan:
+**2. Run the manager:**
 
 ```bash
-docker compose restart
+export MANAGER_API_KEY=$(openssl rand -base64 32)    # keep it: Chatwoot needs the same value
+cd manager
+DOCKER_SOCK=/var/run/docker.sock docker compose up -d --build   # rootless: /run/user/<uid>/docker.sock
+curl -s localhost:8800/health                                  # {"ok":true}
 ```
 
-Look inside the profile (where Viber keeps its data):
+The registry lives in the `manager-data` volume. Keep port 8800 reachable **only from Chatwoot**
+(web + sidekiq), e.g. a private network or firewall rule. If that traffic crosses the internet, put
+the manager behind TLS.
+
+| Manager env | |
+| --- | --- |
+| `MANAGER_API_KEY` | required; the manager refuses to start without it |
+| `DOCKER_SOCK` | host path of the Docker socket (compose only) |
+| `SESSION_MEMORY` | memory limit per Viber container, default `1g` |
+| `VIBER_SESSION_IMAGE` | default `viber-session:latest` |
+| `MANAGER_PORT` | published port, default `8800` |
+
+**3. Configure Chatwoot** (web and sidekiq), then restart both:
+
+| Chatwoot env | |
+| --- | --- |
+| `VIBER_MANAGER_URL` | the manager as Chatwoot's servers reach it, e.g. `http://viber-manager:8800`. Also enables the Viber tile |
+| `VIBER_MANAGER_API_KEY` | the same value as `MANAGER_API_KEY` |
+| `SAFE_FETCH_ALLOW_PRIVATE_NETWORK=true` | only if `VIBER_MANAGER_URL` is a private address (Chatwoot's webhook delivery refuses private IPs otherwise) |
+
+The manager reaches Chatwoot back at its `FRONTEND_URL` (Public API and attachment downloads), so
+that URL must be reachable from the manager.
+
+**4. Check:** *Settings → Inboxes → Add Inbox → Viber* shows a QR, scanning it with
+*Viber → More → QR scanner* creates the inbox `Viber (+number)` and continues to *Add Agents*.
+
+**Upgrading:** a rebuilt `viber-session` image is used by new sessions only. Running containers keep
+their image until recreated with the same name and volume (no tooling for that yet). Rebuild and
+`docker compose up -d --build` in `manager/` to upgrade the manager itself; bound sessions resume.
+
+## Local development
 
 ```bash
-docker compose exec viber-session ls -la /home/viber/.ViberPC
-```
-
-Full reset (logs the session out):
-
-```bash
-docker compose down -v
-```
-
-## Session Manager (`manager/`) — the service
-
-A standalone control plane that makes Viber a self-serve Chatwoot channel: it provisions a Viber
-container per number on demand, serves the login **QR** natively, detects linking + the number,
-holds a dynamic session registry, and runs the per-session inbound/outbound bridge automatically.
-The Chatwoot side is a thin **Viber tile** (a `Channel::Api` inbox) that drives this API and binds
-the resulting inbox + an AgentBot token to a session.
-
-```
-Chatwoot "Viber" tile ──POST /sessions──▶ manager boots a container
-                      ◀─GET  /qr──────── native QR (screenshot), scanned by the user's phone
-                      ◀─GET  /sessions/:id─ status → linked + number
-                      ──POST /bind────▶ {account_id, inbox_id, chatwoot_url, bot token}
-Viber container ─docker logs▶ inbound worker ─▶ Chatwoot (incoming + media, bot token)
-Chatwoot webhook ─▶ POST /chatwoot/webhook ─docker exec▶ agent.py send (outgoing)
-```
-
-Internals (`bridge/` provides the reused Chatwoot HTTP client): incoming are posted **token-free**
-via the **Public Inbox API** (keyed by the channel `inbox_identifier`), with `source_id` = the
-sender's number so contacts/threads never duplicate; media pulled out with `docker cp`. Only 1:1
-chats are bridged (group/community messages carry no sender number and are skipped). The worker
-replays the container log on every attach and drops what its EventID cursor already posted, so
-nothing received while the manager was down is lost.
-
-Outgoing agent replies arrive on the Channel::Api `webhook_url` and are sent by the in-container
-agent: text, and attachments downloaded from Chatwoot (png/jpeg through the media preview with the
-text as caption, other files as files with the text following). Before each send the agent closes
-Viber's overlays (promos, info panels, the "Sync chat history" prompt shown on every start); a send
-counts as delivered only when a new outgoing event to the target appears in the Viber DB. Delivery
-statuses are deferred (the Public API doesn't update message status).
-
-### Run (local)
-
-```bash
-# 1. build + tag the per-session image
-docker compose build                     # tags viber-session:latest
-
-# 2. run the manager ON THE HOST (simplest networking for a local, dockerized Chatwoot)
+docker compose build                                   # session image (needs session/vendor/viber.deb)
+python3 -m venv .venv && . .venv/bin/activate
 pip install -r manager/requirements.txt
-python3 -m manager.app                    # listens on :8800, uses the host docker CLI
-
-# 3. drive it by hand to prove the flow
-curl -s -XPOST localhost:8800/sessions                 # -> {"session_id": "..."}
-curl -s localhost:8800/sessions/<id>/qr -o qr.png      # scan from a phone
-curl -s localhost:8800/sessions/<id>                   # -> {"status":"linked","number":"+..."}
+MANAGER_API_KEY=<key> python3 -m manager.app           # :8800, uses the host docker CLI
 ```
 
-(`manager/docker-compose.yml` runs it as a container with the docker socket mounted — better for a
-hosted deployment. Locally the host run is simpler: the manager reaches a dockerized Chatwoot at
-`http://localhost:3000` directly.)
+Running the manager on the host is the simplest with a dockerized local Chatwoot: the manager
+reaches Chatwoot at `http://localhost:3000`. Chatwoot's containers reach the manager at the host's
+IP, so in Chatwoot's `.env` set `VIBER_MANAGER_URL=http://<host-ip>:8800`, the same
+`VIBER_MANAGER_API_KEY` and `SAFE_FETCH_ALLOW_PRIVATE_NETWORK=true`, then recreate `rails` and
+`sidekiq`. With rootless Docker `host.docker.internal` doesn't reach host processes; use the
+host's LAN/WSL address (`ip -4 addr`), which can change after a reboot.
 
-**Chatwoot env** — the browser and the Rails server reach the manager at different addresses when
-both are local behind Docker, so there are two knobs:
+`docker compose up` at the repo root still starts a single standalone session with its screen at
+http://localhost:6080, which is handy for poking at Viber by hand.
 
-| ENV | Who uses it | Local value |
-| --- | --- | --- |
-| `VIBER_MANAGER_URL` | the browser (onboarding fetches + QR) | `http://localhost:8800` |
-| `VIBER_MANAGER_WEBHOOK_URL` | the Rails container (inbox webhook) | `http://host.docker.internal:8800/chatwoot/webhook` |
+## Manager API
 
-Also run local Chatwoot with `SAFE_FETCH_ALLOW_PRIVATE_NETWORK=true` so the webhook can reach the
-manager. In production with a real manager hostname, set only `VIBER_MANAGER_URL` (the webhook URL
-defaults to `<VIBER_MANAGER_URL>/chatwoot/webhook`).
-
-The Chatwoot "Viber" tile then automates everything: it creates the session, shows the QR, creates
-the inbox on link, and binds it.
-
-### API
+All routes except the webhook and `/health` require `Authorization: Bearer <MANAGER_API_KEY>`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | POST | `/sessions` | provision a container, returns `session_id` |
+| GET | `/sessions` | all sessions (ops/debugging) |
 | GET | `/sessions/:id` | `{status, number}` (starting → linking → linked) |
-| GET | `/sessions/:id/qr` | login QR as `image/png` (409 once linked) |
-| POST | `/sessions/:id/bind` | attach `{inbox_id, inbox_identifier, chatwoot_url}` + start workers |
-| DELETE | `/sessions/:id` | stop + remove container/volume |
-| POST | `/chatwoot/webhook` | Channel::Api webhook → Viber send |
-
-A background **reaper** (once a minute) removes the container + volume of a session whose Chatwoot
-inbox was deleted (Public API returns 404; probe errors never count as deletion) and of onboardings
-that didn't bind within 15 minutes. The Viber tile also deletes its session when you leave the page
-before linking.
+| GET | `/sessions/:id/qr` | login QR as `image/png`; 202 while not on screen, 409 once linked |
+| POST | `/sessions/:id/bind` | `{inbox_id, inbox_identifier, webhook_secret, chatwoot_url, account_id?}`, starts the bridge |
+| DELETE | `/sessions/:id` | stop + remove the container and volume |
+| POST | `/chatwoot/webhook` | Channel::Api webhook, verified by `X-Chatwoot-Signature` |
+| GET | `/health` | liveness |
 
 ## Next steps
 
-- Mirror messages the user sends from Viber directly as outgoing in Chatwoot.
+- Mirror messages sent from the phone as outgoing messages in Chatwoot.
 - Reflect `delivered`/`read` from the Viber DB back to Chatwoot message status.
-- Crop the QR screenshot to the code; optionally decode + re-render crisply.
+- Recreate session containers on a new image without a new QR scan.

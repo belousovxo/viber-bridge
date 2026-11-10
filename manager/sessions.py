@@ -11,16 +11,17 @@ from . import docker_ops, link
 
 
 class SessionManager:
-    def __init__(self, registry, image, log):
+    def __init__(self, registry, image, memory, log):
         self.reg = registry
         self.image = image
+        self.memory = memory
         self.log = log
 
     def create(self):
         sid = uuid.uuid4().hex[:10]
         container = f"viber-session-{sid}"
         volume = f"viber-{sid}"
-        ok, err = docker_ops.run_container(container, self.image, volume)
+        ok, err = docker_ops.run_container(container, self.image, volume, self.memory)
         if not ok:
             raise RuntimeError(f"docker run failed: {err}")
         row = self.reg.create(sid, container, volume)

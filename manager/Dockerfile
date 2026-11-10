@@ -2,8 +2,8 @@
 # to spawn/drive per-session Viber containers, and serves the HTTP API.
 FROM python:3.12-slim
 
-# docker CLI (to drive sibling containers via the mounted socket)
-RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
+# docker CLI only (drives sibling containers via the mounted socket; the daemon is the host's)
+RUN apt-get update && apt-get install -y --no-install-recommends docker-cli \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -14,7 +14,10 @@ RUN pip install --no-cache-dir -r /app/manager/requirements.txt
 COPY bridge /app/bridge
 COPY manager /app/manager
 
-ENV MANAGER_REGISTRY=/data/sessions.json
+ENV MANAGER_REGISTRY=/data/sessions.json PYTHONUNBUFFERED=1
 VOLUME ["/data"]
 EXPOSE 8800
-CMD ["python3", "-m", "manager.app"]
+# Exactly ONE worker: the registry, send queues and per-session threads live in this process.
+# Threads serve concurrent requests (QR polling, webhooks).
+CMD ["gunicorn", "--workers", "1", "--threads", "16", "--bind", "0.0.0.0:8800", \
+     "--access-logfile", "-", "manager.app:create_app()"]

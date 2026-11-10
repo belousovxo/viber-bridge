@@ -14,6 +14,7 @@ Session row:
   account_id       Chatwoot account id         (after bind, informational)
   inbox_id         Chatwoot Channel::Api inbox  (after bind; routes outgoing webhooks)
   inbox_identifier Channel::Api identifier       (after bind; keys the token-free Public Inbox API)
+  webhook_secret   Channel::Api secret           (after bind; verifies the inbox's webhook signature)
   chatwoot_url     base url of that Chatwoot     (after bind)
   contacts         {sender_number: conversation_display_id} cache
   last_event       inbound dedup cursor (Viber EventID)

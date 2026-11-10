@@ -12,12 +12,12 @@ def _run(args, **kw):
     return subprocess.run(["docker", *args], capture_output=True, **kw)
 
 
-def run_container(name, image, volume, shm_size="1g", extra_env=None):
-    """docker run -d a session container with an isolated home volume. Returns True on success."""
-    args = ["run", "-d", "--name", name, "--shm-size", shm_size, "-v", f"{volume}:/home/viber"]
-    for k, v in (extra_env or {}).items():
-        args += ["-e", f"{k}={v}"]
-    args.append(image)
+def run_container(name, image, volume, memory, shm_size="1g"):
+    """docker run -d a session container with an isolated home volume. It comes back on its own
+    after a crash or host reboot (the profile on the volume keeps it logged in). Returns
+    (ok, stderr)."""
+    args = ["run", "-d", "--name", name, "--restart", "unless-stopped", "--memory", memory,
+            "--shm-size", shm_size, "-v", f"{volume}:/home/viber", image]
     r = _run(args, text=True)
     return r.returncode == 0, (r.stderr or "").strip()
 

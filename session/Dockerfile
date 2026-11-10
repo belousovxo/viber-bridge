@@ -50,11 +50,11 @@ RUN ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html \
 
 # AT-SPI accessibility stack — lets the sender wait for the target chat to actually render
 # (event-driven, no guessed delays) and verify the right chat opened. `maim` screenshots the
-# login screen so the manager can serve the QR natively. Trailing layer so the Qt toolchain
-# layer above stays cached.
+# login screen; `zbarimg` decodes the login QR from it and `qrencode` re-renders it crisp, so the
+# manager serves just the code. Trailing layer so the Qt toolchain layer above stays cached.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       at-spi2-core python3-pyatspi python3-gi \
-      maim \
+      maim zbar-tools qrencode \
     && rm -rf /var/lib/apt/lists/*
 
 # ubuntu:24.04 ships user "ubuntu" with uid 1000; rename it to "viber"
