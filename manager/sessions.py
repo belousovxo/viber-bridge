@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Session lifecycle: provision / refresh / destroy Viber containers.
+
+One container + one volume per session, named by the session id. The manager never publishes
+container ports; it drives everything by name via docker_ops.
+"""
+
+import uuid
+
+from . import docker_ops, link
+
+
+class SessionManager:
+    def __init__(self, registry, image, log):
+        self.reg = registry
+        self.image = image
+        self.log = log
+
+    def create(self):
+        sid = uuid.uuid4().hex[:10]
+        container = f"viber-session-{sid}"
+        volume = f"viber-{sid}"
+        ok, err = docker_ops.run_container(container, self.image, volume)
+        if not ok:
+            raise RuntimeError(f"docker run failed: {err}")
+        row = self.reg.create(sid, container, volume)
+        self.log(f"[session] created {sid} -> {container}")
+        return row
+
+    def refresh(self, sid):
+        """Re-probe link status until linked, then freeze it."""
+        row = self.reg.get(sid)
+        if not row:
+            return None
+        if row["status"] != "linked":
+            status, number = link.probe(row["container"])
+            if status != row["status"] or number != row["number"]:
+                row = self.reg.update(sid, status=status, number=number)
+        return row
+
+    def delete(self, sid):
+        row = self.reg.get(sid)
+        if not row:
+            return False
+        docker_ops.stop_and_remove(row["container"])
+        docker_ops.remove_volume(row["volume"])
+        self.reg.delete(sid)
+        self.log(f"[session] deleted {sid}")
+        return True

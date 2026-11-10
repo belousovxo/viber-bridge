@@ -1,0 +1,21 @@
+# Viber Session Manager. Build context is the repo root so it can COPY both bridge/ and manager/.
+# The manager drives sibling Viber containers through the mounted docker socket (rootless: set
+# DOCKER_SOCK to your rootless socket, e.g. /run/user/1000/docker.sock).
+services:
+  manager:
+    build:
+      context: ..
+      dockerfile: manager/Dockerfile
+    image: viber-manager:latest
+    environment:
+      - VIBER_SESSION_IMAGE=viber-session:latest
+      - MANAGER_PORT=8800
+    ports:
+      - "8800:8800"
+    volumes:
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      - manager-data:/data
+    restart: unless-stopped
+
+volumes:
+  manager-data:

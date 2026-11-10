@@ -2,3 +2,7 @@
 *.deb
 __pycache__/
 *.pyc
+registry.yml
+state.json
+sessions.json
+.venv/

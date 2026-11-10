@@ -1,8 +1,10 @@
-# v0: a single Viber Desktop session to check that Viber lives in a container.
-# Screen in the browser: http://localhost:6080
+# A single Viber Desktop session for manual checks (screen in the browser: http://localhost:6080),
+# and the build of the `viber-session:latest` image that the manager runs one-per-number.
+#   docker compose build        # builds + tags viber-session:latest
 services:
   viber-session:
     build: ./session
+    image: viber-session:latest
     platform: linux/amd64
     shm_size: 1gb
     ports:
