@@ -2,13 +2,10 @@
 """Per-session inbound worker: Viber -> Chatwoot.
 
 Tails the session container's log (where the in-container reader prints normalized JSON events),
-and for each new message resolves the contact + conversation of the other party and posts it (text +
-media). Incoming messages go through the Chatwoot Public Inbox API (keyed by the session's
-inbox_identifier; source_id = the contact's number, so threads never duplicate). Outgoing messages
-the owner sent from the phone are recorded as echoes; the ones the bridge itself sent from Chatwoot
-are skipped. Media files are copied out with `docker cp`.
-Dedup is by Viber EventID persisted in the session's registry row; the per-sender conversation id
-is cached there too.
+and posts each new 1:1 message (text + media) to Chatwoot's Viber endpoint with the other party's
+number: incoming ones, and outgoing ones the owner sent from the phone (recorded as echoes). The ones
+the bridge itself sent from Chatwoot are skipped. Media files are copied out with `docker cp`.
+Dedup is by Viber EventID persisted in the session's registry row.
 """
 
 import json
@@ -18,7 +15,7 @@ import tempfile
 import threading
 import time
 
-from bridge.chatwoot import PublicInbox, ViberEchoes
+from bridge.chatwoot import ViberInbox
 
 from . import docker_ops
 
@@ -46,7 +43,6 @@ class InboundWorker(threading.Thread):
         self.log = log
         self._stop = threading.Event()
         self._cw = None
-        self._echoes = None
 
     def stop(self):
         self._stop.set()
@@ -56,13 +52,8 @@ class InboundWorker(threading.Thread):
 
     def _chatwoot(self, row):
         if self._cw is None:
-            self._cw = PublicInbox(row["chatwoot_url"], row["inbox_identifier"])
+            self._cw = ViberInbox(row["chatwoot_url"], row["inbox_identifier"], self.api_key)
         return self._cw
-
-    def _echo_client(self, row):
-        if self._echoes is None:
-            self._echoes = ViberEchoes(row["chatwoot_url"], row["inbox_identifier"], self.api_key)
-        return self._echoes
 
     # ─── media ───────────────────────────────────────────────────────────────
     def _copy_media(self, container, container_path):
@@ -85,18 +76,6 @@ class InboundWorker(threading.Thread):
                 if got:
                     return [got]
         return []
-
-    # ─── conversation resolution (per-sender, cached in the registry row) ──────
-    def _conversation_id(self, row, number, name):
-        contacts = dict(row.get("contacts") or {})
-        if contacts.get(number):
-            return contacts[number]
-        cw = self._chatwoot(row)
-        cw.ensure_contact(number, name)          # source_id = number (idempotent)
-        conv = cw.create_conversation(number)
-        contacts[number] = conv
-        self.reg.update(self.sid, contacts=contacts)
-        return conv
 
     def _handle(self, row, evt):
         if evt.get("type") != "message":
@@ -121,12 +100,9 @@ class InboundWorker(threading.Thread):
         attachments = self._attachments(row["container"], evt)
 
         if content or attachments:
-            conv = self._conversation_id(row, number, name)
-            if outgoing:
-                self._echo_client(row).create(conv, event_id, content=content, attachments=attachments)
-            else:
-                self._chatwoot(row).create_incoming(number, conv, content=content, attachments=attachments)
-            self.log(f"[in] {self.sid} event {event_id} -> conv {conv}"
+            self._chatwoot(row).post_message(number, outgoing, event_id, name=name, content=content,
+                                             attachments=attachments)
+            self.log(f"[in] {self.sid} event {event_id} {number}"
                      f"{' (sent from phone)' if outgoing else ''}{' +media' if attachments else ''}")
         self.reg.update(self.sid, last_event=event_id)
 

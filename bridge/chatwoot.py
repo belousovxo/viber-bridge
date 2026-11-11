@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
-"""Chatwoot **Public Inbox API** client for a Channel::Api inbox.
+"""Client for Chatwoot's Viber endpoint, the manager's only way into Chatwoot:
 
-This is the token-free, contact-facing path designed for custom channels: everything is keyed by
-the channel's `inbox_identifier` (handed to the manager at bind time) plus a per-sender `source_id`.
-We set `source_id` = the sender's E.164 number, and ContactInboxWithContactBuilder is idempotent on
-it, so contacts/threads never duplicate. No agent/bot token is needed for incoming (the AgentBot
-path can't create contacts anyway); outgoing is received separately on the Channel::Api webhook.
+  POST /webhooks/viber/:inbox_identifier   a message of the session (incoming from a contact, or
+                                           outgoing when the owner sent it from the phone)
+  GET  /webhooks/viber/:inbox_identifier   {"exists": bool}
 
-Liveness probe (used by the manager's reaper): GET /public/api/v1/inboxes/:identifier -> 404 once
-the inbox is deleted.
-
-Endpoints (POST):
-  /public/api/v1/inboxes/:identifier/contacts                                   -> create contact
-  /public/api/v1/inboxes/:identifier/contacts/:source_id/conversations          -> create conversation
-  /public/api/v1/inboxes/:identifier/contacts/:source_id/conversations/:id/messages
+Authenticated with the manager API key (`Authorization: Bearer`), the same one Chatwoot uses to call
+the manager. Chatwoot keys the contact by phone number (source_id) and picks the conversation itself,
+so the manager keeps no contact or conversation state.
 """
 
 import requests
@@ -23,70 +17,33 @@ class ChatwootError(RuntimeError):
     pass
 
 
-class PublicInbox:
-    def __init__(self, base_url, inbox_identifier, timeout=20):
-        self.base = f"{base_url}/public/api/v1/inboxes/{inbox_identifier}"
-        self.timeout = timeout
-        self.s = requests.Session()
-
-    def _post(self, path, **kw):
-        r = self.s.post(f"{self.base}{path}", timeout=self.timeout, **kw)
-        if not r.ok:
-            raise ChatwootError(f"POST {path} -> {r.status_code}: {r.text[:300]}")
-        return r.json() if r.content else {}
-
-    def exists(self):
-        """False only on an explicit 404 (inbox/channel deleted). Network errors and 5xx raise, so a
-        Chatwoot outage is never mistaken for a deletion."""
-        r = self.s.get(self.base, timeout=self.timeout)
-        if r.status_code == 404:
-            return False
-        if not r.ok:
-            raise ChatwootError(f"GET inbox -> {r.status_code}")
-        return True
-
-    def ensure_contact(self, number, name=None):
-        """Idempotent on source_id = number. Returns the source_id (= number)."""
-        payload = {"source_id": number, "identifier": number, "phone_number": number}
-        if name:
-            payload["name"] = name
-        self._post("/contacts", json=payload)
-        return number
-
-    def create_conversation(self, source_id):
-        """Returns the conversation display id (used in the messages URL)."""
-        data = self._post(f"/contacts/{source_id}/conversations", json={})
-        return data["id"]
-
-    def create_incoming(self, source_id, conversation_id, content=None, attachments=None):
-        """Post an incoming message. `attachments` is a list of (filename, bytes, mime)."""
-        path = f"/contacts/{source_id}/conversations/{conversation_id}/messages"
-        if attachments:
-            files = [("attachments[]", (fn, blob, mime)) for (fn, blob, mime) in attachments]
-            data = {"content": content} if content else {}
-            res = self._post(path, data=data, files=files)
-        else:
-            res = self._post(path, json={"content": content or ""})
-        return res.get("id")
-
-
-class ViberEchoes:
-    """Chatwoot's `POST /webhooks/viber/:inbox_identifier`: records a message the account owner sent
-    from the phone as an outgoing echo in a conversation (display id from the Public Inbox API).
-    Authenticated with the manager API key, the one Chatwoot uses to call the manager."""
-
+class ViberInbox:
     def __init__(self, base_url, inbox_identifier, api_key, timeout=20):
         self.url = f"{base_url}/webhooks/viber/{inbox_identifier}"
         self.timeout = timeout
         self.s = requests.Session()
         self.s.headers["Authorization"] = f"Bearer {api_key}"
 
-    def create(self, conversation_id, event_id, content=None, attachments=None):
+    def exists(self):
+        """False only when Chatwoot answers `exists: false`. Anything else raises (network errors, 401,
+        404 from a wrong URL or an older Chatwoot, 5xx, non-JSON), so it's never mistaken for a
+        deletion."""
+        r = self.s.get(self.url, timeout=self.timeout)
+        if not r.ok:
+            raise ChatwootError(f"GET inbox -> {r.status_code}")
+        try:
+            return bool(r.json()["exists"])
+        except (ValueError, KeyError) as e:
+            raise ChatwootError(f"GET inbox -> unexpected body: {r.text[:200]}") from e
+
+    def post_message(self, number, outgoing, event_id, name=None, content=None, attachments=None):
         """`attachments` is a list of (filename, bytes, mime)."""
-        data = {"conversation_id": conversation_id, "source_id": event_id}
+        data = {"number": number, "direction": "outgoing" if outgoing else "incoming", "source_id": event_id}
+        if name:
+            data["name"] = name
         if content:
             data["content"] = content
         files = [("attachments[]", att) for att in attachments or []]
         r = self.s.post(self.url, data=data, files=files or None, timeout=self.timeout)
         if not r.ok:
-            raise ChatwootError(f"POST echo -> {r.status_code}: {r.text[:300]}")
+            raise ChatwootError(f"POST message -> {r.status_code}: {r.text[:300]}")

@@ -22,21 +22,26 @@ browser ── Chatwoot (admin only) ──Bearer key──▶ manager ──doc
              POST   viber/sessions/:id/inbox      creates a Channel::Api inbox, then
                                                   POST /sessions/:id/bind {inbox, identifier, secret}
 
-incoming:  viber-session log ─▶ inbound worker ─▶ Chatwoot Public Inbox API (no token)
-from phone: viber-session log ─▶ inbound worker ─▶ POST /webhooks/viber/:identifier (Bearer key)
+incoming + sent from phone:
+           viber-session log ─▶ inbound worker ─▶ POST /webhooks/viber/:identifier (Bearer key)
 outgoing:  Chatwoot inbox webhook (HMAC-signed) ─▶ POST /chatwoot/webhook ─▶ agent.py in the container
 ```
 
-- **Incoming** messages go through the token-free **Public Inbox API**, keyed by the inbox
-  identifier, with `source_id` = the sender's number so contacts and threads never duplicate. Media
+- **Incoming** messages are posted to Chatwoot's `POST /webhooks/viber/:inbox_identifier`,
+  authenticated with the manager API key, the way Instagram messages arrive on Meta-signed webhooks.
+  Chatwoot keys the contact by phone number (`source_id`) and picks the conversation like its other
+  channels (a resolved one stays closed unless the inbox is locked to a single conversation). Media
   is copied out with `docker cp`. Only 1:1 chats are bridged (group/community messages carry no
-  sender number and are skipped). The worker replays the container log on every attach and drops
-  what its EventID cursor already posted, so nothing received while the manager is down is lost.
-- **Sent from the phone**: what the owner writes in Viber itself (phone or desktop) is recorded in
-  the conversation as an outgoing echo (`external_echo`, like Instagram/WhatsApp echoes) through
-  Chatwoot's `POST /webhooks/viber/:inbox_identifier`, authenticated with the same API key. Replies
-  sent from Chatwoot are not echoed back: the agent reports the Viber EventIDs it produced and the
-  worker skips them.
+  number and are skipped). The worker replays the container log on every attach and drops what its
+  EventID cursor already posted, so nothing received while the manager is down is lost.
+- **Sent from the phone**: what the owner writes in Viber itself (phone or desktop) goes the same
+  way and is recorded as an outgoing echo (`external_echo`, like Instagram/WhatsApp echoes).
+  Replies sent from Chatwoot are not echoed back: the agent reports the Viber EventIDs it produced
+  and the worker skips them.
+- **Access**: Chatwoot's token-free Public Inbox API is closed for Viber inboxes (404), since their
+  contacts are keyed by guessable phone numbers. Session containers share the `viber-sessions`
+  network with container-to-container traffic disabled, so nothing else on the host network can
+  reach a session's screen (noVNC).
 - **Outgoing** replies arrive on the inbox webhook. The manager verifies the signature with the
   inbox secret it got at bind time, queues sends per container in Chatwoot message order, and the
   in-container agent types them into Viber: text, png/jpeg through the media preview with the text
@@ -44,7 +49,8 @@ outgoing:  Chatwoot inbox webhook (HMAC-signed) ─▶ POST /chatwoot/webhook �
   Viber's overlays (promos, info panels, the "Sync chat history" prompt shown on every start). A
   send counts as delivered only when a new outgoing event to the target appears in the Viber DB.
 - **Cleanup**: once a minute a reaper removes the container + volume of a session whose inbox was
-  deleted in Chatwoot (Public API returns 404; probe errors never count as a deletion) and of
+  deleted in Chatwoot (only an explicit `exists: false` from the Viber endpoint counts; any probe
+  error, 404 included, keeps the session) and of
   onboardings not completed within 15 minutes. Leaving the tile page before linking drops the
   session right away.
 - Session containers run with `--restart unless-stopped` and a memory limit, and keep their login
@@ -94,7 +100,7 @@ the manager behind TLS.
 | `VIBER_MANAGER_API_KEY` | the same value as `MANAGER_API_KEY` |
 | `SAFE_FETCH_ALLOW_PRIVATE_NETWORK=true` | only if `VIBER_MANAGER_URL` is a private address (Chatwoot's webhook delivery refuses private IPs otherwise) |
 
-The manager reaches Chatwoot back at its `FRONTEND_URL` (Public API and attachment downloads), so
+The manager reaches Chatwoot back at its `FRONTEND_URL` (the Viber endpoint and attachment downloads), so
 that URL must be reachable from the manager.
 
 **4. Check:** *Settings → Inboxes → Add Inbox → Viber* shows a QR, scanning it with

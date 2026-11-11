@@ -13,6 +13,7 @@ path never calls back into the Chatwoot API.
 import json
 import os
 import queue
+import re
 import shutil
 import tempfile
 import threading
@@ -27,6 +28,7 @@ AGENT = "/usr/local/bin/agent.py"
 OUTBOX_PREFIX = "/tmp/outbox-"  # per-message dir inside the container holding files to send
 OUTBOX_GLOB = "outbox-*"
 REORDER_WINDOW = 0.3  # seconds to let shuffled webhooks of back-to-back replies arrive
+PHONE_NUMBER = re.compile(r"\+[1-9]\d{6,14}")  # E.164; the agent puts it into a viber:// URI and SQL
 SENT_EVENTS_CAP = 2000  # EventIDs of our own sends remembered per container
 
 # agent.py drives the Viber UI via xdotool + AT-SPI, so `docker exec` must join the container's
@@ -140,6 +142,9 @@ class Dispatcher:
             return
 
         number = "+" + str(number).lstrip("+")
+        if not PHONE_NUMBER.fullmatch(number):
+            self.log(f"[out] skip msg {message_id}: recipient {number!r} is not a phone number")
+            return
         container = session["container"]
         if attachments:
             res = self._send_files(container, number, attachments, content, message_id)

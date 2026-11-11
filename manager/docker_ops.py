@@ -12,12 +12,26 @@ def _run(args, **kw):
     return subprocess.run(["docker", *args], capture_output=True, **kw)
 
 
+SESSION_NETWORK = "viber-sessions"
+
+
+def ensure_session_network():
+    """Session containers get internet but must not reach each other (or be reached from other
+    containers): their screen (noVNC) is unauthenticated. A bridge network with inter-container
+    traffic disabled does both."""
+    if _run(["network", "inspect", SESSION_NETWORK]).returncode != 0:
+        r = _run(["network", "create", "-o", "com.docker.network.bridge.enable_icc=false", SESSION_NETWORK],
+                 text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"docker network create {SESSION_NETWORK} failed: {r.stderr.strip()}")
+
+
 def run_container(name, image, volume, memory, shm_size="1g"):
-    """docker run -d a session container with an isolated home volume. It comes back on its own
-    after a crash or host reboot (the profile on the volume keeps it logged in). Returns
-    (ok, stderr)."""
+    """docker run -d a session container with an isolated home volume on the session network. It
+    comes back on its own after a crash or host reboot (the profile on the volume keeps it logged
+    in). Returns (ok, stderr)."""
     args = ["run", "-d", "--name", name, "--restart", "unless-stopped", "--memory", memory,
-            "--shm-size", shm_size, "-v", f"{volume}:/home/viber", image]
+            "--shm-size", shm_size, "--network", SESSION_NETWORK, "-v", f"{volume}:/home/viber", image]
     r = _run(args, text=True)
     return r.returncode == 0, (r.stderr or "").strip()
 

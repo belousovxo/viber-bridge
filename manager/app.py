@@ -37,6 +37,7 @@ import time
 
 from flask import Flask, Response, jsonify, request
 
+from . import docker_ops
 from .outbound import Dispatcher
 from .qr import qr_png
 from .reaper import Reaper
@@ -80,8 +81,9 @@ def create_app():
         workers.stop(sid)
         return sessions.delete(sid)
 
+    docker_ops.ensure_session_network()
     workers.start_bound()  # resume bound sessions after a restart
-    Reaper(registry, teardown, log).start()  # drop sessions of deleted inboxes / abandoned onboarding
+    Reaper(registry, teardown, api_key, log).start()  # drop sessions of deleted inboxes / abandoned onboarding
 
     app = Flask(__name__)
 
