@@ -3,9 +3,11 @@
 
 The shared webhook endpoint authenticates each Channel::Api payload, resolves its session and hands
 both here. Outgoing messages are queued per container and sent in Chatwoot message order by the
-in-container agent to the recipient number. Attachments are downloaded from their Chatwoot `data_url`, copied into the
-container and sent as files (the text becomes the first file's caption). Delivery-status updates
-are deferred, so this path never calls back into the Chatwoot API.
+in-container agent to the recipient number. Attachments are downloaded from their Chatwoot
+`data_url`, copied into the container and sent as files (the text becomes the first file's caption).
+The agent reports the Viber EventIDs it produced, so the inbound worker can tell these sends from
+messages the owner typed on the phone (`sent_here`). Delivery-status updates are deferred, so this
+path never calls back into the Chatwoot API.
 """
 
 import json
@@ -25,6 +27,7 @@ AGENT = "/usr/local/bin/agent.py"
 OUTBOX_PREFIX = "/tmp/outbox-"  # per-message dir inside the container holding files to send
 OUTBOX_GLOB = "outbox-*"
 REORDER_WINDOW = 0.3  # seconds to let shuffled webhooks of back-to-back replies arrive
+SENT_EVENTS_CAP = 2000  # EventIDs of our own sends remembered per container
 
 # agent.py drives the Viber UI via xdotool + AT-SPI, so `docker exec` must join the container's
 # running session: its X display and the shared D-Bus session bus (where at-spi-bus-launcher
@@ -48,12 +51,19 @@ def _is_outgoing(payload):
     return payload.get("message_type") in ("outgoing", 1)
 
 
+def _is_echo(payload):
+    """Messages the owner sent from the phone, recorded back into Chatwoot: they're already in Viber."""
+    return bool((payload.get("content_attributes") or {}).get("external_echo"))
+
+
 class Dispatcher:
     def __init__(self, log):
         self.log = log
         self._seen = set()
         self._lock = threading.Lock()
         self._queues = {}
+        self._idle = {}   # container -> Event, cleared while a send runs
+        self._sent = {}   # container -> EventIDs our sends produced
 
     def _dedup(self, message_id, cap=2000):
         with self._lock:
@@ -67,32 +77,58 @@ class Dispatcher:
     def handle(self, session, payload):
         """Takes an authenticated webhook payload for `session`. Outgoing messages are queued per
         container: one Viber window means sends run one at a time, in Chatwoot message order."""
-        if payload.get("event") != "message_created" or not _is_outgoing(payload) or payload.get("private"):
+        if (payload.get("event") != "message_created" or not _is_outgoing(payload) or payload.get("private")
+                or _is_echo(payload)):
             return
         message_id = payload.get("id")
         if message_id is None or not self._dedup(message_id):
             return
         self._queue(session["container"]).put((message_id, session, payload))
 
+    def sent_here(self, container, event_id):
+        """Whether an outgoing Viber event came from one of our sends. A send in flight is awaited
+        first: its event can reach the log before the agent reports its id."""
+        self._idle_event(container).wait()
+        return event_id in self._sent.get(container, ())
+
+    def _idle_event(self, container):
+        with self._lock:
+            idle = self._idle.get(container)
+            if idle is None:
+                idle = self._idle[container] = threading.Event()
+                idle.set()
+            return idle
+
     def _queue(self, container):
         with self._lock:
             q = self._queues.get(container)
             if q is None:
                 q = self._queues[container] = queue.PriorityQueue()
-                threading.Thread(target=self._drain, args=(q,), daemon=True, name=f"out-{container}").start()
+                threading.Thread(target=self._drain, args=(container, q), daemon=True,
+                                 name=f"out-{container}").start()
             return q
 
-    def _drain(self, q):
+    def _remember_sent(self, container, event_ids):
+        with self._lock:
+            sent = self._sent.setdefault(container, [])
+            sent.extend(event_ids)
+            del sent[:-SENT_EVENTS_CAP]
+
+    def _drain(self, container, q):
         """Sends the lowest message id first. Chatwoot delivers webhooks in parallel, so back-to-back
         replies arrive shuffled by milliseconds: wait a short window, then take the lowest id."""
         while True:
             q.put(q.get())  # block until there is work
             time.sleep(REORDER_WINDOW)
             _, session, payload = q.get()
+            idle = self._idle_event(container)
+            idle.clear()
             try:
                 self._deliver(session, payload)
             except Exception as e:  # noqa: BLE001 — one bad message must not stop the queue
                 self.log(f"[out] {session['id']} msg {payload.get('id')} error: {e}")
+            finally:
+                idle.set()
 
     def _deliver(self, session, payload):
         message_id = payload["id"]
@@ -154,7 +190,9 @@ class Dispatcher:
             line = line.strip()
             if line.startswith("{"):
                 try:
-                    return json.loads(line)
+                    res = json.loads(line)
                 except json.JSONDecodeError:
                     break
+                self._remember_sent(container, res.get("event_ids", []))
+                return res
         return {"ok": False, "reason": f"agent exit {r.returncode}: {(r.stderr or '')[:200]}"}

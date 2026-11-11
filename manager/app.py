@@ -7,7 +7,8 @@ workers + the shared outbound webhook. Standalone service called server-to-serve
 (never by browsers).
 
 Env:
-  MANAGER_API_KEY       required; Chatwoot sends it as `Authorization: Bearer <key>`
+  MANAGER_API_KEY       required; Chatwoot sends it as `Authorization: Bearer <key>`, and the manager
+                        sends it back when recording messages sent from the phone
   VIBER_SESSION_IMAGE   image to run per session           (default: viber-session:latest)
   SESSION_MEMORY        memory limit per session container (default: 1g)
   MANAGER_REGISTRY      session store path                 (default: sessions.json)
@@ -72,8 +73,8 @@ def create_app():
     registry = Registry(os.environ.get("MANAGER_REGISTRY", "sessions.json"))
     sessions = SessionManager(registry, os.environ.get("VIBER_SESSION_IMAGE", "viber-session:latest"),
                               os.environ.get("SESSION_MEMORY", "1g"), log)
-    workers = Workers(registry, log)
     dispatcher = Dispatcher(log)
+    workers = Workers(registry, dispatcher, api_key, log)
 
     def teardown(sid):
         workers.stop(sid)

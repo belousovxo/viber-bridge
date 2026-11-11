@@ -23,6 +23,7 @@ browser ── Chatwoot (admin only) ──Bearer key──▶ manager ──doc
                                                   POST /sessions/:id/bind {inbox, identifier, secret}
 
 incoming:  viber-session log ─▶ inbound worker ─▶ Chatwoot Public Inbox API (no token)
+from phone: viber-session log ─▶ inbound worker ─▶ POST /webhooks/viber/:identifier (Bearer key)
 outgoing:  Chatwoot inbox webhook (HMAC-signed) ─▶ POST /chatwoot/webhook ─▶ agent.py in the container
 ```
 
@@ -31,6 +32,11 @@ outgoing:  Chatwoot inbox webhook (HMAC-signed) ─▶ POST /chatwoot/webhook �
   is copied out with `docker cp`. Only 1:1 chats are bridged (group/community messages carry no
   sender number and are skipped). The worker replays the container log on every attach and drops
   what its EventID cursor already posted, so nothing received while the manager is down is lost.
+- **Sent from the phone**: what the owner writes in Viber itself (phone or desktop) is recorded in
+  the conversation as an outgoing echo (`external_echo`, like Instagram/WhatsApp echoes) through
+  Chatwoot's `POST /webhooks/viber/:inbox_identifier`, authenticated with the same API key. Replies
+  sent from Chatwoot are not echoed back: the agent reports the Viber EventIDs it produced and the
+  worker skips them.
 - **Outgoing** replies arrive on the inbox webhook. The manager verifies the signature with the
   inbox secret it got at bind time, queues sends per container in Chatwoot message order, and the
   in-container agent types them into Viber: text, png/jpeg through the media preview with the text
@@ -134,6 +140,5 @@ All routes except the webhook and `/health` require `Authorization: Bearer <MANA
 
 ## Next steps
 
-- Mirror messages sent from the phone as outgoing messages in Chatwoot.
 - Reflect `delivered`/`read` from the Viber DB back to Chatwoot message status.
 - Recreate session containers on a new image without a new QR scan.

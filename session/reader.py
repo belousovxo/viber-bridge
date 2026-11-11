@@ -86,7 +86,11 @@ def query_new(profile, key, last_id):
         db = os.path.join(tmp, "viber.db")
         sql = (
             f"SELECT {EVENT_COLUMNS} FROM Events e "
-            f"LEFT JOIN Contact c ON c.ContactID = e.ContactID "
+            # the other party: the sender of an incoming event; for an outgoing one (whose ContactID
+            # is self, ContactID 1) the chat's only other member, so group chats get no contact
+            f"LEFT JOIN Contact c ON c.ContactID = CASE WHEN e.Direction = 1 THEN "
+            f"(SELECT CASE WHEN COUNT(*) = 1 THEN MAX(cr.ContactID) END FROM ChatRelation cr "
+            f"WHERE cr.ChatID = e.ChatID AND cr.ContactID <> 1) ELSE e.ContactID END "
             f"WHERE e.EventID > {int(last_id)} ORDER BY e.EventID"
         )
         env = dict(os.environ)
@@ -141,8 +145,9 @@ def normalize(row):
         "chat_id": row.get("ChatID"),
         "contact_id": row.get("ContactID"),
         "contact": {
-            # Number is present for saved/number-sharing users; bots & some unsaved users
-            # have only a stable MID. Name falls back to the Viber-side ClientName.
+            # The other party (sender of incoming, recipient of outgoing). Number is present for
+            # saved/number-sharing users; bots & some unsaved users have only a stable MID. Name
+            # falls back to the Viber-side ClientName.
             "name": row.get("ContactName") or row.get("ContactClientName"),
             "number": row.get("ContactNumber") or None,
             "mid": row.get("ContactMID") or None,

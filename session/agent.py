@@ -136,6 +136,13 @@ def last_outgoing_event_id():
     return int(rows[0].get("id") or 0) if rows else 0
 
 
+def outgoing_event_ids(after_event_id):
+    """EventIDs of the outgoing messages newer than `after_event_id`: the ones this send produced. The
+    manager uses them to tell its own sends from messages typed on the phone."""
+    rows = db_query(f"SELECT EventID FROM Events WHERE Direction = 1 AND EventID > {int(after_event_id)}")
+    return [int(r["EventID"]) for r in rows]
+
+
 def recipient_of_last_outgoing(after_event_id):
     """The OTHER party (recipient) of the newest outgoing message NEWER than `after_event_id`, by
     number. Only a new event proves this send happened: an older outgoing message to the same chat
@@ -326,14 +333,15 @@ def confirm(number, baseline, t0):
             break
         time.sleep(0.1)
     confirmed = recipient is not None and norm(recipient) == number
+    event_ids = outgoing_event_ids(baseline) if recipient else []
     if confirmed:
         save_open_chat(number)
         return {"ok": True, "reason": "delivered", "elapsed": time.time() - t0,
-                "confirmed_recipient": recipient}
+                "confirmed_recipient": recipient, "event_ids": event_ids}
     # misroute (or couldn't verify): do NOT trust the open-chat memory
     save_open_chat("")
     return {"ok": False, "reason": "verify_mismatch", "elapsed": time.time() - t0,
-            "db_recipient": recipient, "target": number}
+            "db_recipient": recipient, "target": number, "event_ids": event_ids}
 
 
 def send(number, text):
@@ -386,8 +394,10 @@ def send_file(number, path, caption=""):
     res = confirm(number, baseline, t0)
     if res.get("ok") and caption:
         cap = send(number, caption)
+        event_ids = res["event_ids"] + cap.get("event_ids", [])
         if not cap.get("ok"):
-            return {**cap, "reason": f"file sent, caption failed: {cap.get('reason')}"}
+            return {**cap, "reason": f"file sent, caption failed: {cap.get('reason')}", "event_ids": event_ids}
+        return {**res, "event_ids": event_ids}
     return res
 
 

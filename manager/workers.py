@@ -7,8 +7,10 @@ from .inbound import InboundWorker
 
 
 class Workers:
-    def __init__(self, registry, log):
+    def __init__(self, registry, dispatcher, api_key, log):
         self.reg = registry
+        self.dispatcher = dispatcher
+        self.api_key = api_key
         self.log = log
         self._workers = {}
         self._lock = threading.Lock()
@@ -17,7 +19,7 @@ class Workers:
         with self._lock:
             if sid in self._workers:
                 return
-            w = InboundWorker(sid, self.reg, self.log)
+            w = InboundWorker(sid, self.reg, self.dispatcher, self.api_key, self.log)
             self._workers[sid] = w
             w.start()
         self.log(f"[workers] inbound started for {sid}")

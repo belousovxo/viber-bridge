@@ -68,3 +68,25 @@ class PublicInbox:
         else:
             res = self._post(path, json={"content": content or ""})
         return res.get("id")
+
+
+class ViberEchoes:
+    """Chatwoot's `POST /webhooks/viber/:inbox_identifier`: records a message the account owner sent
+    from the phone as an outgoing echo in a conversation (display id from the Public Inbox API).
+    Authenticated with the manager API key, the one Chatwoot uses to call the manager."""
+
+    def __init__(self, base_url, inbox_identifier, api_key, timeout=20):
+        self.url = f"{base_url}/webhooks/viber/{inbox_identifier}"
+        self.timeout = timeout
+        self.s = requests.Session()
+        self.s.headers["Authorization"] = f"Bearer {api_key}"
+
+    def create(self, conversation_id, event_id, content=None, attachments=None):
+        """`attachments` is a list of (filename, bytes, mime)."""
+        data = {"conversation_id": conversation_id, "source_id": event_id}
+        if content:
+            data["content"] = content
+        files = [("attachments[]", att) for att in attachments or []]
+        r = self.s.post(self.url, data=data, files=files or None, timeout=self.timeout)
+        if not r.ok:
+            raise ChatwootError(f"POST echo -> {r.status_code}: {r.text[:300]}")
