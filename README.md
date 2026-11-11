@@ -78,7 +78,10 @@ The manager needs the Docker daemon that will run the Viber containers (it mount
 outbound internet for Viber. It can share the host with Chatwoot or run on its own. Each linked
 number takes ~350 MB RAM (limit per container: `SESSION_MEMORY`, default `1g`).
 
-**1. Build the session image** on that Docker host. The pinned Viber `.deb` is not in git:
+**1. Build the session image** on that Docker host. The pinned Viber `.deb` is not in git, and the
+CDN only serves the latest build: once Viber moves past the pin, the `curl` below gets the wrong
+version. Keep a copy of the pinned `.deb` (or build the image once and push it to a private
+registry) instead of relying on the CDN:
 
 ```bash
 git clone <this repo> viber-bridge && cd viber-bridge
@@ -122,9 +125,25 @@ that URL must be reachable from the manager.
 **4. Check:** *Settings → Inboxes → Add Inbox → Viber* shows a QR, scanning it with
 *Viber → More → QR scanner* creates the inbox `Viber (+number)` and continues to *Add Agents*.
 
-**Upgrading:** a rebuilt `viber-session` image is used by new sessions only. Running containers keep
-their image until recreated with the same name and volume (no tooling for that yet). Rebuild and
-`docker compose up -d --build` in `manager/` to upgrade the manager itself; bound sessions resume.
+Chatwoot also needs Sidekiq running (read statuses go through a job) and SMTP configured, so admins
+get the email when a Viber inbox loses its connection.
+
+**Upgrading:** rebuild the session image (step 1), then restart the manager
+(`docker compose up -d --build` in `manager/`, which also upgrades the manager itself). On start it
+recreates every session container that runs an older image, on the same volume, so they stay
+linked. Viber ignores SIGTERM, so this kills it hard; that once left a database Viber refused to
+open, which the bridge then reports like an unlinked session (the inbox asks for a QR reconnect).
+Upgrade at a quiet time.
+
+**Operating notes:**
+
+- Every QR link activates a new Viber desktop for that number. Viber refuses activations after too
+  many in a short time ("Please contact support"), for hours. Don't churn sessions, and remove
+  stale devices on the phone (*Settings → Account → Computers and tablets*).
+- Back up the `manager-data` volume: the registry holds each session's inbox binding and webhook
+  secret. Without it the containers keep running but their inboxes silently stop receiving.
+- The mounted Docker socket gives the manager root-equivalent access to its host: run it where that
+  is acceptable (ideally a host or VM of its own).
 
 ## Local development
 
