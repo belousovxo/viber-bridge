@@ -49,9 +49,9 @@ class SessionManager:
         for row in self.reg.all():
             if docker_ops.container_image_id(row["container"]) in (None, current):
                 continue
-            # a hard kill mid-write left Viber with a database it refused to open ("Something went
-            # wrong"), so the old container is stopped gracefully first
-            docker_ops.stop(row["container"])
+            # Viber ignores SIGTERM and has no other clean-quit path, so this is a hard kill (as is
+            # any docker stop). SQLite usually survives it; once it didn't (Viber's "Something went
+            # wrong"), and "Fix now" there wipes the profile, which the reaper reports as unlinked.
             docker_ops.stop_and_remove(row["container"])
             ok, err = docker_ops.run_container(row["container"], self.image, row["volume"], self.memory)
             if not ok:

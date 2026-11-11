@@ -6,8 +6,9 @@ timer instead:
   - bound session  -> probe the inbox on Chatwoot's Viber endpoint; only an explicit
                       `exists: false` means the inbox was deleted, so stop the worker and remove the
                       container + volume. Probe errors (Chatwoot down, 401, 404, 5xx) are skipped.
-                      A session whose Viber was unlinked on the phone is reported to Chatwoot (the
-                      inbox asks for reconnection, which links a fresh session) and removed.
+                      A session whose Viber was unlinked on the phone, or whose database Viber
+                      broke (unreadable for minutes), is reported to Chatwoot (the inbox asks for
+                      reconnection, which links a fresh session) and removed.
   - unbound session older than UNBOUND_TTL -> abandoned onboarding (tab closed before linking or
                       before bind): remove it so idle Viber containers don't pile up.
 """
@@ -52,13 +53,13 @@ class Reaper:
                 if not alive:
                     self.log(f"[reaper] {sid} inbox {row['inbox_id']} deleted -> teardown")
                     self.teardown(sid)
-                elif link.unlinked(row["container"]):
+                elif reason := link.lost(row["container"]):
                     try:
                         inbox.report_unlinked()
                     except Exception as e:  # noqa: BLE001 — Chatwoot must hear it first; retry next pass
-                        self.log(f"[reaper] {sid} unlinked, report failed, keeping: {e}")
+                        self.log(f"[reaper] {sid} {reason}, report failed, keeping: {e}")
                         continue
-                    self.log(f"[reaper] {sid} Viber unlinked on the phone -> reported, teardown")
+                    self.log(f"[reaper] {sid} Viber {reason} -> reported, teardown")
                     self.teardown(sid)
             elif now - row["created_at"] > UNBOUND_TTL:
                 self.log(f"[reaper] {sid} unbound for {int(now - row['created_at'])}s -> teardown")

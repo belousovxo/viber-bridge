@@ -29,6 +29,8 @@ HARNESS = "/usr/local/bin/viber_dump"
 STATE_DIR = os.path.join(HOME, ".viber-bridge")
 STATE_FILE = os.path.join(STATE_DIR, "last_event")
 
+UNREADABLE_FILE = "/tmp/viber-db-unreadable"  # the manager treats this session as lost
+UNREADABLE_AFTER = 180  # seconds of failing reads in a row before the DB counts as unreadable
 DEBOUNCE = 0.3          # seconds of quiet after a write burst before reading
 SAFETY_POLL = 30.0      # seconds; fallback in case an inotify event is missed
 
@@ -58,6 +60,9 @@ TEXT_TYPES = (1, 2, 9, 15)
 SHARED_CONTACT = 10
 DELETED = 72
 DELETED_SQL = f"SELECT EventID FROM Events WHERE MessageType = {DELETED}"
+
+# since when reads fail without a success in between (None while they work)
+_failing_since = None
 
 # what this run already reported, so each read marker / deletion is printed once
 _reported_reads = {}
@@ -141,9 +146,27 @@ def run_sql(db, key, sql):
                 rows.append(json.loads(line))
             except json.JSONDecodeError:
                 pass
-    if r.returncode != 0 and not rows:
+    failed = r.returncode != 0 and not rows
+    if failed:
         log({"type": "reader_error", "stderr": r.stderr.strip()[:300]})
+    track_readability(failed)
     return rows
+
+
+def track_readability(failed):
+    """A DB that stays unreadable (e.g. Viber broke it on a hard kill and shows "Something went
+    wrong") leaves the session useless: after UNREADABLE_AFTER the marker file tells the manager,
+    which handles it like an unlinked session. A lone failure (a snapshot taken mid-write) and any
+    success in between don't count."""
+    global _failing_since
+    if not failed:
+        _failing_since = None
+        if os.path.exists(UNREADABLE_FILE):
+            os.remove(UNREADABLE_FILE)
+        return
+    _failing_since = _failing_since or time.time()
+    if time.time() - _failing_since >= UNREADABLE_AFTER:
+        open(UNREADABLE_FILE, "w").close()
 
 
 def query_new(db, key, last_id):

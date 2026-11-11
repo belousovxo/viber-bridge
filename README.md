@@ -36,7 +36,9 @@ outgoing:  Chatwoot inbox webhook (HMAC-signed) ─▶ POST /chatwoot/webhook �
   EventID cursor already posted, so nothing received while the manager is down is lost.
   Text, images, video, voice and files arrive as such; links and GIFs as their URL, shared contacts
   as name + number; other types (stickers, media Viber didn't download) as an "unsupported message",
-  like Instagram's.
+  like Instagram's. Like Instagram, replies link to the message they quote, a message deleted for
+  everyone is marked deleted, outgoing messages turn `read` when the contact reads them (Viber's
+  `ChatsMetaData` read marker), and the contact's Viber photo becomes their avatar.
 - **Sent from the phone**: what the owner writes in Viber itself (phone or desktop) goes the same
   way and is recorded as an outgoing echo (`external_echo`, like Instagram/WhatsApp echoes).
   Replies sent from Chatwoot are not echoed back: the agent reports the Viber EventIDs it produced
@@ -57,7 +59,9 @@ outgoing:  Chatwoot inbox webhook (HMAC-signed) ─▶ POST /chatwoot/webhook �
   notices (a running container without a profile), Chatwoot flags the inbox for reauthorization
   like an expired Instagram (sidebar warning, settings banner, email to admins), and the dead
   session is removed. The banner's reconnect runs the QR flow again and binds the new session to
-  the same inbox; only the inbox's own number is accepted.
+  the same inbox; only the inbox's own number is accepted. A session whose database Viber can no
+  longer open (it shows "Something went wrong", seen once after a hard kill) is handled the same
+  way: the reader marks the DB unreadable after 3 minutes of failed reads and the reaper reports it.
 - **Cleanup**: once a minute a reaper removes the container + volume of a session whose inbox was
   deleted in Chatwoot (only an explicit `exists: false` from the Viber endpoint counts; any probe
   error, 404 included, keeps the session) and of
@@ -158,13 +162,7 @@ All routes except the webhook and `/health` require `Authorization: Bearer <MANA
 
 ## Next steps
 
-Instagram parity:
+- When Viber refuses to activate a new desktop (too many activations of a number), the session shows
+  Viber's error dialog and the Chatwoot QR page keeps spinning. Surface that error instead.
 
-- Read status of outgoing messages (Instagram: `read` events). Sent messages already carry their
-  Viber EventID as `source_id`; `ChatInfo.LastReadMessageId` looks like the signal.
-- Messages the contact deletes (Instagram: `is_deleted` -> unsend), if the Viber DB shows them.
-- Quoted replies from the contact linked to the original message (Instagram: `in_reply_to_external_id`).
-  Viber keeps the quote in `Events.Info` (`quote.token` matches the quoted event's `Token`).
-- Contact avatars (Instagram: profile picture on contact creation), if the Viber DB has them.
-
-Out of scope: group and community chats.
+Out of scope: group and community chats, contacts without a phone number.

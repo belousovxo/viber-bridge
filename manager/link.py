@@ -13,14 +13,20 @@ import re
 from . import docker_ops
 
 
-def unlinked(container):
-    """A linked session whose Viber login is gone: unlinking on the phone makes Viber delete the
-    profile dir and go back to the QR screen. The profile lives on the volume, so a restart never
-    looks like this; a stopped container is unknown (False)."""
+def lost(container):
+    """Why a linked session can no longer work, or None:
+      - "unlinked": unlinking on the phone makes Viber delete the profile dir and go back to the QR
+        screen (the profile lives on the volume, so a restart never looks like this);
+      - "unreadable": the reader has failed to open viber.db for minutes (session/reader.py).
+    A stopped container is unknown (None)."""
     if not docker_ops.container_running(container):
-        return False
-    ok, out = docker_ops.exec_sh(container, "ls /home/viber/.ViberPC/*/viber.db 2>/dev/null; true")
-    return ok and not (out or "").strip()
+        return None
+    ok, out = docker_ops.exec_sh(
+        container,
+        "ls /home/viber/.ViberPC/*/viber.db >/dev/null 2>&1 || echo unlinked; "
+        "test -e /tmp/viber-db-unreadable && echo unreadable; true")
+    reasons = (out or "").split() if ok else []
+    return reasons[0] if reasons else None
 
 
 def probe(container):
