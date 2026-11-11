@@ -34,6 +34,9 @@ outgoing:  Chatwoot inbox webhook (HMAC-signed) ─▶ POST /chatwoot/webhook �
   is copied out with `docker cp`. Only 1:1 chats are bridged (group/community messages carry no
   number and are skipped). The worker replays the container log on every attach and drops what its
   EventID cursor already posted, so nothing received while the manager is down is lost.
+  Text, images, video, voice and files arrive as such; links and GIFs as their URL, shared contacts
+  as name + number; other types (stickers, media Viber didn't download) as an "unsupported message",
+  like Instagram's.
 - **Sent from the phone**: what the owner writes in Viber itself (phone or desktop) goes the same
   way and is recorded as an outgoing echo (`external_echo`, like Instagram/WhatsApp echoes).
   Replies sent from Chatwoot are not echoed back: the agent reports the Viber EventIDs it produced
@@ -48,13 +51,22 @@ outgoing:  Chatwoot inbox webhook (HMAC-signed) ─▶ POST /chatwoot/webhook �
   as caption, other files as files with the text following. Before each send the agent closes
   Viber's overlays (promos, info panels, the "Sync chat history" prompt shown on every start). A
   send counts as delivered only when a new outgoing event to the target appears in the Viber DB.
+  The outcome goes back to Chatwoot: the message gets its Viber EventID as `source_id`, or is marked
+  failed with the reason.
+- **Unlinked on the phone**: Viber deletes the profile and returns to its QR screen. The reaper
+  notices (a running container without a profile), Chatwoot flags the inbox for reauthorization
+  like an expired Instagram (sidebar warning, settings banner, email to admins), and the dead
+  session is removed. The banner's reconnect runs the QR flow again and binds the new session to
+  the same inbox; only the inbox's own number is accepted.
 - **Cleanup**: once a minute a reaper removes the container + volume of a session whose inbox was
   deleted in Chatwoot (only an explicit `exists: false` from the Viber endpoint counts; any probe
   error, 404 included, keeps the session) and of
   onboardings not completed within 15 minutes. Leaving the tile page before linking drops the
   session right away.
 - Session containers run with `--restart unless-stopped` and a memory limit, and keep their login
-  on the volume, so a crash or host reboot doesn't need a new QR scan.
+  on the volume, so a crash or host reboot doesn't need a new QR scan. On start the manager
+  recreates containers that run an older build of the session image on the same volume, so a
+  rebuilt image reaches running sessions without a new QR scan: rebuild, then restart the manager.
 
 ## Production deploy
 
@@ -146,5 +158,13 @@ All routes except the webhook and `/health` require `Authorization: Bearer <MANA
 
 ## Next steps
 
-- Reflect `delivered`/`read` from the Viber DB back to Chatwoot message status.
-- Recreate session containers on a new image without a new QR scan.
+Instagram parity:
+
+- Read status of outgoing messages (Instagram: `read` events). Sent messages already carry their
+  Viber EventID as `source_id`; `ChatInfo.LastReadMessageId` looks like the signal.
+- Messages the contact deletes (Instagram: `is_deleted` -> unsend), if the Viber DB shows them.
+- Quoted replies from the contact linked to the original message (Instagram: `in_reply_to_external_id`).
+  Viber keeps the quote in `Events.Info` (`quote.token` matches the quoted event's `Token`).
+- Contact avatars (Instagram: profile picture on contact creation), if the Viber DB has them.
+
+Out of scope: group and community chats.

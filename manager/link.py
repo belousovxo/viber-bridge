@@ -13,6 +13,16 @@ import re
 from . import docker_ops
 
 
+def unlinked(container):
+    """A linked session whose Viber login is gone: unlinking on the phone makes Viber delete the
+    profile dir and go back to the QR screen. The profile lives on the volume, so a restart never
+    looks like this; a stopped container is unknown (False)."""
+    if not docker_ops.container_running(container):
+        return False
+    ok, out = docker_ops.exec_sh(container, "ls /home/viber/.ViberPC/*/viber.db 2>/dev/null; true")
+    return ok and not (out or "").strip()
+
+
 def probe(container):
     """Return (status, number). status in {starting, linking, linked}."""
     if not docker_ops.container_running(container):

@@ -39,6 +39,22 @@ class SessionManager:
                 row = self.reg.update(sid, status=status, number=number)
         return row
 
+    def upgrade_outdated(self):
+        """Recreates session containers that run an older build of the session image. The Viber
+        login and the reader's cursor live on the volume, so the session stays linked; the inbound
+        worker reattaches to the new container's log by name. Run before the workers start."""
+        current = docker_ops.image_id(self.image)
+        if not current:
+            raise RuntimeError(f"session image {self.image} not found")
+        for row in self.reg.all():
+            if docker_ops.container_image_id(row["container"]) in (None, current):
+                continue
+            docker_ops.stop_and_remove(row["container"])
+            ok, err = docker_ops.run_container(row["container"], self.image, row["volume"], self.memory)
+            if not ok:
+                raise RuntimeError(f"recreating {row['container']} failed: {err}")
+            self.log(f"[session] {row['id']} recreated on the current image")
+
     def delete(self, sid):
         row = self.reg.get(sid)
         if not row:

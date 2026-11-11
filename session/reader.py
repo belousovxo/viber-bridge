@@ -33,10 +33,24 @@ SAFETY_POLL = 30.0      # seconds; fallback in case an inotify event is missed
 EVENT_COLUMNS = (
     "e.EventID, e.TimeStamp, e.Direction, e.Type, e.MessageType, e.MessageStatus, "
     "e.ChatID, e.ContactID, e.Body, e.PayloadPath, e.ThumbnailPath, e.Duration, "
-    "e.CallType, e.CallStatus, "
+    "e.CallType, e.CallStatus, e.Info, "
     "c.Name AS ContactName, c.ClientName AS ContactClientName, "
     "c.Number AS ContactNumber, c.MID AS ContactMID"
 )
+
+
+# Viber MessageType: 0 system event (no content), 1 text, 2 image (+caption), 3 video, 9 link or GIF
+# (the URL is the body), 10 shared contact (in Info), 11 voice, 15 formatted text.
+TEXT_TYPES = (1, 2, 9, 15)
+SHARED_CONTACT = 10
+
+
+def shared_contact(info):
+    try:
+        card = json.loads(info or "{}")
+    except json.JSONDecodeError:
+        return None
+    return {"name": card.get("Name"), "number": card.get("PhoneNumber")}
 
 
 def log(obj):
@@ -131,7 +145,7 @@ def media_entry(path):
 def normalize(row):
     ts = int(row.get("TimeStamp") or 0)
     iso = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat() if ts else None
-    mtype = int(row.get("MessageType") or -1)
+    mtype = int(row.get("MessageType") or 0)
     body = row.get("Body") or ""
     thumb = media_entry(row.get("ThumbnailPath"))
     payload = media_entry(row.get("PayloadPath"))
@@ -152,9 +166,11 @@ def normalize(row):
             "number": row.get("ContactNumber") or None,
             "mid": row.get("ContactMID") or None,
         },
-        "text": body if mtype in (1, 2, 15) else None,
+        "text": body if mtype in TEXT_TYPES else None,
         "body_raw": body,
     }
+    if mtype == SHARED_CONTACT:
+        evt["shared_contact"] = shared_contact(row.get("Info"))
     if thumb or payload:
         evt["media"] = {"thumbnail": thumb, "payload": payload}
     if row.get("CallType") or row.get("CallStatus"):

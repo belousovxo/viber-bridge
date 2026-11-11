@@ -6,8 +6,8 @@ both here. Outgoing messages are queued per container and sent in Chatwoot messa
 in-container agent to the recipient number. Attachments are downloaded from their Chatwoot
 `data_url`, copied into the container and sent as files (the text becomes the first file's caption).
 The agent reports the Viber EventIDs it produced, so the inbound worker can tell these sends from
-messages the owner typed on the phone (`sent_here`). Delivery-status updates are deferred, so this
-path never calls back into the Chatwoot API.
+messages the owner typed on the phone (`sent_here`). Each outcome is reported back to Chatwoot: the
+message gets its Viber EventID as source_id, or is marked failed with the reason.
 """
 
 import json
@@ -21,6 +21,8 @@ import time
 from urllib.parse import unquote, urlparse
 
 import requests
+
+from bridge.chatwoot import ViberInbox
 
 from . import docker_ops
 
@@ -59,7 +61,8 @@ def _is_echo(payload):
 
 
 class Dispatcher:
-    def __init__(self, log):
+    def __init__(self, api_key, log):
+        self.api_key = api_key
         self.log = log
         self._seen = set()
         self._lock = threading.Lock()
@@ -128,23 +131,36 @@ class Dispatcher:
             try:
                 self._deliver(session, payload)
             except Exception as e:  # noqa: BLE001 — one bad message must not stop the queue
-                self.log(f"[out] {session['id']} msg {payload.get('id')} error: {e}")
+                self._report(session, payload["id"], error=f"bridge error: {e}")
             finally:
                 idle.set()
+
+    def _report(self, session, message_id, source_id=None, error=None):
+        """Tells Chatwoot how the send went; a failed report must not stop the queue."""
+        if error:
+            self.log(f"[out] {session['id']} msg {message_id} FAILED: {error}")
+        try:
+            ViberInbox(session["chatwoot_url"], session["inbox_identifier"], self.api_key).message_result(
+                message_id, source_id=source_id, error=error)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[out] {session['id']} msg {message_id} result not reported: {e}")
 
     def _deliver(self, session, payload):
         message_id = payload["id"]
         number = _number_from_payload(payload)
         content = payload.get("content")
         attachments = payload.get("attachments") or []
-        if not number or not (content or attachments):
-            self.log(f"[out] skip msg {message_id}: {'no number' if not number else 'empty message'}")
+        if not number:
+            self._report(session, message_id, error="the contact has no Viber number")
+            return
+        if not (content or attachments):
+            self._report(session, message_id, error="this message type can't be sent to Viber")
             return
 
-        number = "+" + str(number).lstrip("+")
-        if not PHONE_NUMBER.fullmatch(number):
-            self.log(f"[out] skip msg {message_id}: recipient {number!r} is not a phone number")
+        if not PHONE_NUMBER.fullmatch("+" + str(number).lstrip("+")):
+            self._report(session, message_id, error=f"the contact's Viber id {number} is not a phone number")
             return
+        number = "+" + str(number).lstrip("+")
         container = session["container"]
         if attachments:
             res = self._send_files(container, number, attachments, content, message_id)
@@ -152,8 +168,9 @@ class Dispatcher:
             res = self._agent(container, ["send", number, content])
         if res.get("ok"):
             self.log(f"[out] {session['id']} {number} delivered ({res.get('elapsed', 0):.2f}s) msg {message_id}")
+            self._report(session, message_id, source_id=max(res["event_ids"]))
         else:
-            self.log(f"[out] {number} msg {message_id} FAILED: {res.get('reason')}")
+            self._report(session, message_id, error=f"not sent to Viber: {res.get('reason')}")
 
     def _send_files(self, container, number, attachments, caption, message_id):
         """Download the Chatwoot attachments, copy them into the container, send each one; the

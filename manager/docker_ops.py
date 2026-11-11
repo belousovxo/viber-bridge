@@ -36,6 +36,16 @@ def run_container(name, image, volume, memory, shm_size="1g"):
     return r.returncode == 0, (r.stderr or "").strip()
 
 
+def image_id(image):
+    r = _run(["image", "inspect", "-f", "{{.Id}}", image], text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def container_image_id(name):
+    r = _run(["inspect", "-f", "{{.Image}}", name], text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 def container_running(name):
     r = _run(["inspect", "-f", "{{.State.Running}}", name], text=True)
     return r.returncode == 0 and r.stdout.strip() == "true"

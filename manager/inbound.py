@@ -33,6 +33,13 @@ def _clean_name(name):
     return (name or "").translate(_BIDI_ISOLATES).strip() or None
 
 
+def _shared_contact_text(card):
+    """A shared Viber contact, as text: name and number on separate lines."""
+    if not card:
+        return None
+    return "\n".join(v for v in (_clean_name(card.get("name")), card.get("number")) if v) or None
+
+
 class InboundWorker(threading.Thread):
     def __init__(self, session_id, registry, dispatcher, api_key, log):
         super().__init__(daemon=True, name=f"inbound-{session_id}")
@@ -96,14 +103,18 @@ class InboundWorker(threading.Thread):
             return
         number = "+" + str(contact["number"]).lstrip("+")
         name = _clean_name(contact.get("name"))
-        content = evt.get("text") or None
+        content = evt.get("text") or _shared_contact_text(evt.get("shared_contact"))
         attachments = self._attachments(row["container"], evt)
+        # a real message (not a system event, type 0) we can't render, e.g. a sticker or media that
+        # Viber didn't download: recorded as unsupported, like Instagram does, rather than dropped
+        unsupported = not (content or attachments) and evt.get("message_type", 0) != 0
 
-        if content or attachments:
+        if content or attachments or unsupported:
             self._chatwoot(row).post_message(number, outgoing, event_id, name=name, content=content,
-                                             attachments=attachments)
+                                             attachments=attachments, unsupported=unsupported)
             self.log(f"[in] {self.sid} event {event_id} {number}"
-                     f"{' (sent from phone)' if outgoing else ''}{' +media' if attachments else ''}")
+                     f"{' (sent from phone)' if outgoing else ''}{' +media' if attachments else ''}"
+                     f"{' (unsupported type ' + str(evt.get('message_type')) + ')' if unsupported else ''}")
         self.reg.update(self.sid, last_event=event_id)
 
     # ─── log tail loop ────────────────────────────────────────────────────────

@@ -74,7 +74,7 @@ def create_app():
     registry = Registry(os.environ.get("MANAGER_REGISTRY", "sessions.json"))
     sessions = SessionManager(registry, os.environ.get("VIBER_SESSION_IMAGE", "viber-session:latest"),
                               os.environ.get("SESSION_MEMORY", "1g"), log)
-    dispatcher = Dispatcher(log)
+    dispatcher = Dispatcher(api_key, log)
     workers = Workers(registry, dispatcher, api_key, log)
 
     def teardown(sid):
@@ -82,6 +82,7 @@ def create_app():
         return sessions.delete(sid)
 
     docker_ops.ensure_session_network()
+    sessions.upgrade_outdated()  # a rebuilt session image reaches running sessions on restart
     workers.start_bound()  # resume bound sessions after a restart
     Reaper(registry, teardown, api_key, log).start()  # drop sessions of deleted inboxes / abandoned onboarding
 
