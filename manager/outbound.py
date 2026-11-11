@@ -93,8 +93,12 @@ class Dispatcher:
     def sent_here(self, container, event_id):
         """Whether an outgoing Viber event came from one of our sends. A send in flight is awaited
         first: its event can reach the log before the agent reports its id."""
-        self._idle_event(container).wait()
+        self.wait_idle(container)
         return event_id in self._sent.get(container, ())
+
+    def wait_idle(self, container):
+        """Blocks while a send runs in `container`; its outcome is reported to Chatwoot by then."""
+        self._idle_event(container).wait()
 
     def _idle_event(self, container):
         with self._lock:

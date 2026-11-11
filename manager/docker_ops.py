@@ -51,6 +51,11 @@ def container_running(name):
     return r.returncode == 0 and r.stdout.strip() == "true"
 
 
+def stop(name, timeout=45):
+    """docker stop: SIGTERM, SIGKILL only after `timeout`, so Viber can close its databases."""
+    _run(["stop", "-t", str(timeout), name], text=True)
+
+
 def stop_and_remove(name):
     _run(["rm", "-f", name], text=True)
 

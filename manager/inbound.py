@@ -4,8 +4,12 @@
 Tails the session container's log (where the in-container reader prints normalized JSON events),
 and posts each new 1:1 message (text + media) to Chatwoot's Viber endpoint with the other party's
 number: incoming ones, and outgoing ones the owner sent from the phone (recorded as echoes). The ones
-the bridge itself sent from Chatwoot are skipped. Media files are copied out with `docker cp`.
-Dedup is by Viber EventID persisted in the session's registry row.
+the bridge itself sent from Chatwoot are skipped. Media files are copied out with `docker cp`, and so
+is the contact's Viber photo, sent along once per worker run as their avatar. Replies carry the event
+they quote. The reader also reports changes to existing events, which go to Chatwoot like Instagram's
+`read` and unsend events: how far the contact has read, and messages deleted for everyone.
+Dedup is by Viber EventID persisted in the session's registry row; read/deleted are idempotent and
+deduped per run.
 """
 
 import json
@@ -50,6 +54,9 @@ class InboundWorker(threading.Thread):
         self.log = log
         self._stop = threading.Event()
         self._cw = None
+        self._avatars = {}   # number -> avatar path sent this run
+        self._reads = {}     # number -> last read event reported this run
+        self._deleted = set()
 
     def stop(self):
         self._stop.set()
@@ -84,11 +91,45 @@ class InboundWorker(threading.Thread):
                     return [got]
         return []
 
+    def _avatar(self, container, number, path):
+        """The contact's photo, once per run (and again if it changes)."""
+        if not path or self._avatars.get(number) == path:
+            return None
+        return self._copy_media(container, path)
+
     def _handle(self, row, evt):
-        if evt.get("type") != "message":
+        kind = evt.get("type")
+        if kind == "read":
+            self._handle_read(row, evt)
+        elif kind == "deleted":
+            self._handle_deleted(row, evt)
+        elif kind == "message":
+            self._handle_message(row, evt)
+
+    def _handle_read(self, row, evt):
+        number, event_id = evt["number"], int(evt["event_id"])
+        if self._reads.get(number) == event_id:
             return
+        # a reply sent from Chatwoot gets its source_id when its send finishes: let that land first
+        self.dispatcher.wait_idle(row["container"])
+        self._chatwoot(row).mark_read(event_id)
+        self._reads[number] = event_id
+        self.log(f"[in] {self.sid} {number} read up to event {event_id}")
+
+    def _handle_deleted(self, row, evt):
+        event_id = int(evt["event_id"])
+        if event_id in self._deleted:
+            return
+        self._chatwoot(row).mark_deleted(event_id)
+        self._deleted.add(event_id)
+        self.log(f"[in] {self.sid} event {event_id} deleted")
+
+    def _handle_message(self, row, evt):
         event_id = int(evt.get("event_id") or 0)
         if event_id <= int(row.get("last_event") or 0):
+            return
+        if evt.get("deleted"):  # deleted for everyone before we saw it: nothing to show
+            self.reg.update(self.sid, last_event=event_id)
             return
         outgoing = evt.get("direction") == "out"
         if outgoing and self.dispatcher.sent_here(row["container"], event_id):
@@ -110,8 +151,12 @@ class InboundWorker(threading.Thread):
         unsupported = not (content or attachments) and evt.get("message_type", 0) != 0
 
         if content or attachments or unsupported:
+            avatar = self._avatar(row["container"], number, contact.get("avatar"))
             self._chatwoot(row).post_message(number, outgoing, event_id, name=name, content=content,
-                                             attachments=attachments, unsupported=unsupported)
+                                             attachments=attachments, unsupported=unsupported,
+                                             quoted_event_id=evt.get("quoted_event_id"), avatar=avatar)
+            if avatar:
+                self._avatars[number] = contact["avatar"]
             self.log(f"[in] {self.sid} event {event_id} {number}"
                      f"{' (sent from phone)' if outgoing else ''}{' +media' if attachments else ''}"
                      f"{' (unsupported type ' + str(evt.get('message_type')) + ')' if unsupported else ''}")

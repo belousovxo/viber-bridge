@@ -49,6 +49,9 @@ class SessionManager:
         for row in self.reg.all():
             if docker_ops.container_image_id(row["container"]) in (None, current):
                 continue
+            # a hard kill mid-write left Viber with a database it refused to open ("Something went
+            # wrong"), so the old container is stopped gracefully first
+            docker_ops.stop(row["container"])
             docker_ops.stop_and_remove(row["container"])
             ok, err = docker_ops.run_container(row["container"], self.image, row["volume"], self.memory)
             if not ok:

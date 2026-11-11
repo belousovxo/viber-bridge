@@ -6,6 +6,8 @@
   POST /webhooks/viber/:inbox_identifier/messages/:id   result of sending an outgoing message:
                                            {source_id} (its Viber EventID) or {error}
   POST /webhooks/viber/:inbox_identifier/unlinked      the session lost its Viber login
+  POST /webhooks/viber/:inbox_identifier/read          the contact read our messages up to {source_id}
+  POST /webhooks/viber/:inbox_identifier/deleted       message {source_id} was deleted for everyone
   GET  /webhooks/viber/:inbox_identifier   {"exists": bool}
 
 Authenticated with the manager API key (`Authorization: Bearer`), the same one Chatwoot uses to call
@@ -40,20 +42,36 @@ class ViberInbox:
             raise ChatwootError(f"GET inbox -> unexpected body: {r.text[:200]}") from e
 
     def post_message(self, number, outgoing, event_id, name=None, content=None, attachments=None,
-                     unsupported=False):
-        """`attachments` is a list of (filename, bytes, mime). `unsupported` marks a message whose type
-        Chatwoot can't show (it then needs neither content nor attachments)."""
+                     unsupported=False, quoted_event_id=None, avatar=None):
+        """`attachments` is a list of (filename, bytes, mime), `avatar` one such file. `unsupported`
+        marks a message whose type Chatwoot can't show (it then needs neither content nor
+        attachments); `quoted_event_id` is the Viber event a reply quotes."""
         data = {"number": number, "direction": "outgoing" if outgoing else "incoming", "source_id": event_id}
         if unsupported:
             data["unsupported"] = "true"
+        if quoted_event_id:
+            data["in_reply_to_external_id"] = quoted_event_id
         if name:
             data["name"] = name
         if content:
             data["content"] = content
         files = [("attachments[]", att) for att in attachments or []]
+        if avatar:
+            files.append(("avatar", avatar))
         r = self.s.post(self.url, data=data, files=files or None, timeout=self.timeout)
         if not r.ok:
             raise ChatwootError(f"POST message -> {r.status_code}: {r.text[:300]}")
+
+    def mark_read(self, event_id):
+        self._post_event("read", event_id)
+
+    def mark_deleted(self, event_id):
+        self._post_event("deleted", event_id)
+
+    def _post_event(self, kind, event_id):
+        r = self.s.post(f"{self.url}/{kind}", data={"source_id": event_id}, timeout=self.timeout)
+        if not r.ok:
+            raise ChatwootError(f"POST {kind} -> {r.status_code}: {r.text[:300]}")
 
     def report_unlinked(self):
         r = self.s.post(f"{self.url}/unlinked", timeout=self.timeout)

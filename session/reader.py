@@ -10,9 +10,11 @@ This step just prints events to stdout (container log) so we can verify text + s
 media are captured. Sending and the Chatwoot bridge come next.
 """
 
+import contextlib
 import glob
 import json
 import os
+import re
 import selectors
 import shutil
 import subprocess
@@ -34,15 +36,32 @@ EVENT_COLUMNS = (
     "e.EventID, e.TimeStamp, e.Direction, e.Type, e.MessageType, e.MessageStatus, "
     "e.ChatID, e.ContactID, e.Body, e.PayloadPath, e.ThumbnailPath, e.Duration, "
     "e.CallType, e.CallStatus, e.Info, "
+    # the event a reply quotes: Viber keeps the quoted message's Token in Info
+    "(SELECT q.EventID FROM Events q WHERE q.Token = json_extract(e.Info, '$.quote.token')) AS QuotedEventID, "
     "c.Name AS ContactName, c.ClientName AS ContactClientName, "
-    "c.Number AS ContactNumber, c.MID AS ContactMID"
+    "c.Number AS ContactNumber, c.MID AS ContactMID, c.DownloadID AS ContactAvatarID"
+)
+
+# How far the contact has read our messages: ChatsMetaData type 15 of a 1:1 chat (keyed by the
+# contact's MID) holds, under "1", the Token of the last message of ours they read.
+READ_MARKERS_SQL = (
+    "SELECT c.Number AS Number, "
+    "(SELECT EventID FROM Events WHERE Token = json_extract(m.Value, '$.\"1\".tok')) AS EventID "
+    "FROM ChatsMetaData m JOIN Contact c ON c.MID = m.ChatToken WHERE m.Type = 15"
 )
 
 
 # Viber MessageType: 0 system event (no content), 1 text, 2 image (+caption), 3 video, 9 link or GIF
-# (the URL is the body), 10 shared contact (in Info), 11 voice, 15 formatted text.
+# (the URL is the body), 10 shared contact (in Info), 11 voice, 15 formatted text, 72 deleted (a
+# message deleted for everyone is rewritten in place to this type, same EventID).
 TEXT_TYPES = (1, 2, 9, 15)
 SHARED_CONTACT = 10
+DELETED = 72
+DELETED_SQL = f"SELECT EventID FROM Events WHERE MessageType = {DELETED}"
+
+# what this run already reported, so each read marker / deletion is printed once
+_reported_reads = {}
+_reported_deletions = set()
 
 
 def shared_contact(info):
@@ -62,7 +81,6 @@ def captured_key():
         blob = open(KEY_FILE, "r", errors="ignore").read()
     except OSError:
         return None
-    import re
     m = re.search(r"[0-9a-fA-F]{64}", blob)
     return m.group(0) if m else None
 
@@ -89,47 +107,71 @@ def write_state(last_id):
     os.replace(tmp, STATE_FILE)
 
 
-def query_new(profile, key, last_id):
-    """Snapshot the DB and return new Events (as dicts) with EventID > last_id."""
+@contextlib.contextmanager
+def snapshot(profile):
+    """A private copy of the live DB (Viber keeps writing to it) for one pass of queries."""
     tmp = tempfile.mkdtemp(prefix="viberread_")
     try:
         for sfx in ("", "-wal", "-shm"):
             src = profile + "viber.db" + sfx
             if os.path.exists(src):
                 shutil.copy2(src, os.path.join(tmp, "viber.db" + sfx))
-        db = os.path.join(tmp, "viber.db")
-        sql = (
-            f"SELECT {EVENT_COLUMNS} FROM Events e "
-            # the other party: the sender of an incoming event; for an outgoing one (whose ContactID
-            # is self, ContactID 1) the chat's only other member, so group chats get no contact
-            f"LEFT JOIN Contact c ON c.ContactID = CASE WHEN e.Direction = 1 THEN "
-            f"(SELECT CASE WHEN COUNT(*) = 1 THEN MAX(cr.ContactID) END FROM ChatRelation cr "
-            f"WHERE cr.ChatID = e.ChatID AND cr.ContactID <> 1) ELSE e.ContactID END "
-            f"WHERE e.EventID > {int(last_id)} ORDER BY e.EventID"
-        )
-        env = dict(os.environ)
-        env.update({
-            "VIBER_DB": db,
-            "VIBER_HEXKEY": key,
-            "VIBER_JSON": "1",
-            "LD_LIBRARY_PATH": "/opt/viber/lib",
-            "QT_PLUGIN_PATH": "/opt/viber/plugins",
-            "QT_QPA_PLATFORM": "offscreen",
-        })
-        r = subprocess.run([HARNESS, sql], env=env, capture_output=True, text=True, timeout=60)
-        rows = []
-        for line in r.stdout.splitlines():
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-        if r.returncode != 0 and not rows:
-            log({"type": "reader_error", "stderr": r.stderr.strip()[:300]})
-        return rows
+        yield os.path.join(tmp, "viber.db")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def run_sql(db, key, sql):
+    """Rows (as dicts) of `sql` on a snapshot, through Viber's own sqlite plugin."""
+    env = dict(os.environ)
+    env.update({
+        "VIBER_DB": db,
+        "VIBER_HEXKEY": key,
+        "VIBER_JSON": "1",
+        "LD_LIBRARY_PATH": "/opt/viber/lib",
+        "QT_PLUGIN_PATH": "/opt/viber/plugins",
+        "QT_QPA_PLATFORM": "offscreen",
+    })
+    r = subprocess.run([HARNESS, sql], env=env, capture_output=True, text=True, timeout=60)
+    rows = []
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    if r.returncode != 0 and not rows:
+        log({"type": "reader_error", "stderr": r.stderr.strip()[:300]})
+    return rows
+
+
+def query_new(db, key, last_id):
+    """New Events (as dicts) with EventID > last_id."""
+    return run_sql(db, key, (
+        f"SELECT {EVENT_COLUMNS} FROM Events e "
+        # the other party: the sender of an incoming event; for an outgoing one (whose ContactID
+        # is self, ContactID 1) the chat's only other member, so group chats get no contact
+        f"LEFT JOIN Contact c ON c.ContactID = CASE WHEN e.Direction = 1 THEN "
+        f"(SELECT CASE WHEN COUNT(*) = 1 THEN MAX(cr.ContactID) END FROM ChatRelation cr "
+        f"WHERE cr.ChatID = e.ChatID AND cr.ContactID <> 1) ELSE e.ContactID END "
+        f"WHERE e.EventID > {int(last_id)} ORDER BY e.EventID"
+    ))
+
+
+def report_state(db, key):
+    """Changes to existing events: how far each contact has read, and messages deleted for everyone.
+    Each is printed once per run; after a restart they repeat, which the bridge applies idempotently."""
+    for row in run_sql(db, key, READ_MARKERS_SQL):
+        number, event_id = row.get("Number"), int(row.get("EventID") or 0)
+        if number and event_id and _reported_reads.get(number) != event_id:
+            _reported_reads[number] = event_id
+            log({"type": "read", "number": number, "event_id": event_id})
+    for row in run_sql(db, key, DELETED_SQL):
+        event_id = int(row["EventID"])
+        if event_id not in _reported_deletions:
+            _reported_deletions.add(event_id)
+            log({"type": "deleted", "event_id": event_id})
 
 
 def media_entry(path):
@@ -142,7 +184,13 @@ def media_entry(path):
     return {"path": path, "exists": os.path.exists(path)}
 
 
-def normalize(row):
+def avatar_path(profile, download_id):
+    """Viber downloads contact photos to Avatars/<DownloadID> once it shows them."""
+    path = os.path.join(profile, "Avatars", download_id) if download_id else None
+    return path if path and os.path.exists(path) else None
+
+
+def normalize(row, profile):
     ts = int(row.get("TimeStamp") or 0)
     iso = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat() if ts else None
     mtype = int(row.get("MessageType") or 0)
@@ -165,9 +213,12 @@ def normalize(row):
             "name": row.get("ContactName") or row.get("ContactClientName"),
             "number": row.get("ContactNumber") or None,
             "mid": row.get("ContactMID") or None,
+            "avatar": avatar_path(profile, row.get("ContactAvatarID")),
         },
         "text": body if mtype in TEXT_TYPES else None,
         "body_raw": body,
+        "deleted": mtype == DELETED,
+        "quoted_event_id": int(row["QuotedEventID"]) if row.get("QuotedEventID") else None,
     }
     if mtype == SHARED_CONTACT:
         evt["shared_contact"] = shared_contact(row.get("Info"))
@@ -181,13 +232,15 @@ def normalize(row):
 
 def process(profile, key):
     last = read_state()
-    rows = query_new(profile, key, last)
-    new_last = last
-    for row in rows:
-        log(normalize(row))
-        new_last = max(new_last, int(row.get("EventID") or 0))
-    if new_last != last:
-        write_state(new_last)
+    with snapshot(profile) as db:
+        rows = query_new(db, key, last)
+        new_last = last
+        for row in rows:
+            log(normalize(row, profile))
+            new_last = max(new_last, int(row.get("EventID") or 0))
+        if new_last != last:
+            write_state(new_last)
+        report_state(db, key)
 
 
 def main():
