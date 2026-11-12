@@ -74,6 +74,9 @@ outgoing:  Chatwoot inbox webhook (HMAC-signed) ─▶ POST /chatwoot/webhook �
 
 ## Production deploy
 
+With Dokploy: [DEPLOY_DOKPLOY.md](DEPLOY_DOKPLOY.md) (compose file `manager/docker-compose.dokploy.yml`).
+Without it:
+
 The manager needs the Docker daemon that will run the Viber containers (it mounts its socket) and
 outbound internet for Viber. It can share the host with Chatwoot or run on its own. Each linked
 number takes ~350 MB RAM (limit per container: `SESSION_MEMORY`, default `1g`).

@@ -1,0 +1,45 @@
+# Viber bridge for Dokploy (Docker Compose service, Compose Path: ./manager/docker-compose.dokploy.yml).
+# Instructions: DEPLOY_DOKPLOY.md at the repo root.
+#
+# Every deploy builds both images on the target server:
+#   viber-session-image  builds viber-session:latest (Viber is downloaded from its CDN and checked
+#                        against the pinned build) and exits at once. The manager runs one
+#                        container per Viber number from this image. "Exited (0)" is expected.
+#   manager              the bridge itself. No published port: the domain set in Dokploy's Domains
+#                        tab (service "manager", port 8800) routes to it through Traefik.
+# On start the manager moves running Viber sessions to a freshly built session image by itself.
+services:
+  viber-session-image:
+    build:
+      context: ../session
+    image: viber-session:latest
+    platform: linux/amd64
+    entrypoint: ["true"]
+    restart: "no"
+
+  manager:
+    build:
+      context: ..
+      dockerfile: manager/Dockerfile
+    image: viber-manager:latest
+    depends_on:
+      viber-session-image:
+        condition: service_completed_successfully
+    environment:
+      - MANAGER_API_KEY=${MANAGER_API_KEY:?set MANAGER_API_KEY in Dokploy Environment}
+      - VIBER_SESSION_IMAGE=viber-session:latest
+      - SESSION_MEMORY=${SESSION_MEMORY:-1g}
+    expose:
+      - "8800"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - manager-data:/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8800/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  manager-data:
