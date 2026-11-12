@@ -17,13 +17,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Viber Desktop — pinned build. We vendor the exact .deb (see session/README) instead of
-# pulling "latest" from the CDN, so a rebuild never silently changes the Viber version.
-# Expected: viber_29.4.0.7_amd64.deb
-COPY vendor/viber.deb /tmp/viber.deb
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends /tmp/viber.deb \
-    && rm -rf /tmp/viber.deb /var/lib/apt/lists/*
+# Viber Desktop — pinned build (see session/vendor/README.md). The reader, the key capture and the
+# UI-driven sending are tied to this exact build, so the .deb is checked against its sha256 and the
+# build fails instead of silently installing another version. Source: session/vendor/viber.deb if
+# present, otherwise the CDN (which only serves the latest build, so this works until Viber moves on).
+ARG VIBER_VERSION=29.4.0.7
+ARG VIBER_SHA256=34b3c18f5d441a9813066811d037e971e1207d439c246766abd28e185a7ecd37
+ARG VIBER_URL=https://download.cdn.viber.com/cdn/desktop/Linux/viber.deb
+COPY vendor/ /tmp/vendor/
+RUN set -e; \
+    if [ -f /tmp/vendor/viber.deb ]; then mv /tmp/vendor/viber.deb /tmp/viber.deb; \
+    else curl -fsSL -o /tmp/viber.deb "$VIBER_URL"; fi; \
+    if ! echo "$VIBER_SHA256  /tmp/viber.deb" | sha256sum -c - >/dev/null 2>&1; then \
+      echo "ERROR: viber.deb is not Viber $VIBER_VERSION (the bridge is only verified on that build)."; \
+      echo "The CDN has probably moved to a newer Viber. Put the pinned viber.deb into"; \
+      echo "session/vendor/ (see session/vendor/README.md), or verify the bridge on the new build."; \
+      exit 1; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends /tmp/viber.deb; \
+    rm -rf /tmp/viber.deb /tmp/vendor /var/lib/apt/lists/*
 
 # python3 for the reader/agent, xdotool+xclip to drive sending via the UI, inotify-tools for the
 # reader's change trigger, and gcc/g++/Qt6 to build the key-capture shim and the DB-read harness

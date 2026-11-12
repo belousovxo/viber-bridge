@@ -78,17 +78,18 @@ The manager needs the Docker daemon that will run the Viber containers (it mount
 outbound internet for Viber. It can share the host with Chatwoot or run on its own. Each linked
 number takes ~350 MB RAM (limit per container: `SESSION_MEMORY`, default `1g`).
 
-**1. Build the session image** on that Docker host. The pinned Viber `.deb` is not in git, and the
-CDN only serves the latest build: once Viber moves past the pin, the `curl` below gets the wrong
-version. Keep a copy of the pinned `.deb` (or build the image once and push it to a private
-registry) instead of relying on the CDN:
+**1. Build the session image** on that Docker host:
 
 ```bash
 git clone <this repo> viber-bridge && cd viber-bridge
-curl -fsSL -o session/vendor/viber.deb https://download.cdn.viber.com/cdn/desktop/Linux/viber.deb
-dpkg-deb -f session/vendor/viber.deb Version     # must be 29.4.0.7, see session/vendor/README.md
 docker compose build                             # tags viber-session:latest
 ```
+
+The build downloads Viber from its CDN and checks it against the pinned build (29.4.0.7, by
+sha256). The CDN only serves the latest Viber, so once a newer one is out the build stops with
+"viber.deb is not Viber 29.4.0.7": put a saved copy of the pinned `.deb` into
+`session/vendor/viber.deb` and build again (see [session/vendor/README.md](session/vendor/README.md)).
+Keep that copy somewhere outside the server.
 
 **2. Run the manager:**
 
@@ -148,7 +149,7 @@ Upgrade at a quiet time.
 ## Local development
 
 ```bash
-docker compose build                                   # session image (needs session/vendor/viber.deb)
+docker compose build                                   # session image (Viber from session/vendor/ or the CDN)
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r manager/requirements.txt
 MANAGER_API_KEY=<key> python3 -m manager.app           # :8800, uses the host docker CLI
